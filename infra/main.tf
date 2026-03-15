@@ -181,7 +181,7 @@ resource "aws_instance" "take_server" {
 
     # ── System setup ──
     yum update -y
-    yum install -y python3 python3-pip docker git sqlite wget bzip2
+    yum install -y python3 python3-pip docker git sqlite wget bzip2 cmake gcc gcc-c++ make python3-devel
 
     # ── Nitro Enclave CLI ──
     amazon-linux-extras install aws-nitro-enclaves-cli -y 2>/dev/null || \

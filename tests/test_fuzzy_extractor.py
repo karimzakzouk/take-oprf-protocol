@@ -29,11 +29,11 @@ class TestFuzzyExtractor:
         return bytes(rng.integers(0, 256, 128, dtype=np.uint8))
 
     def test_gen_output_lengths(self):
-        """Gen should return R (32 bytes) and P (160 bytes = 32 nonce + 128 sketch)."""
+        """Gen should return R (32 bytes) and P (128 bytes = 32 nonce + 96 syndrome)."""
         bio = self._fake_bio()
         R, P = Gen(bio)
         assert len(R) == 32,  f"R should be 32 bytes, got {len(R)}"
-        assert len(P) == 160, f"P should be 160 bytes, got {len(P)}"
+        assert len(P) == 128, f"P should be 128 bytes, got {len(P)}"
 
     def test_gen_deterministic_R_for_same_bio(self):
         """

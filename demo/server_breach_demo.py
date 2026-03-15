@@ -19,7 +19,7 @@ RESET  = "\033[0m"
 BG_RED = "\033[41m"
 BG_GREEN = "\033[42m"
 
-SERVER   = os.environ.get("TAKE_SERVER_IP", "18.208.203.94")  # Replace with your EC2 IP
+SERVER   = os.environ.get("TAKE_SERVER_IP", "100.53.228.140")  # Replace with your EC2 IP
 SSH_KEY  = os.environ.get("TAKE_SSH_KEY", "../infra/my-key.pem")  # Path to your private key
 SSH_USER = "ec2-user"
 TMPDIR   = tempfile.mkdtemp(prefix="take_breach_")

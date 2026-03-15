@@ -99,7 +99,7 @@ class RegisterActivity : AppCompatActivity() {
 
         val R = ByteArray(32).also { SecureRandom().nextBytes(it) }
         pendingR = R
-        pendingP = ByteArray(160)  // dummy P for fingerprint mode
+        pendingP = ByteArray(128)  // dummy P for fingerprint mode
 
         keystoreManager.generateKey()
 
@@ -283,7 +283,7 @@ class RegisterActivity : AppCompatActivity() {
     }
 
     companion object {
-        const val DEFAULT_SERVER_URL = "http://18.208.203.94:5000"
+        const val DEFAULT_SERVER_URL = "http://100.53.228.140:5000"
         const val PREFS_NAME = "take_prefs"
         const val PREF_BIO_MODE = "bio_mode"
     }

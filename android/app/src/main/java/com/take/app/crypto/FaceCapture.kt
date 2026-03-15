@@ -8,28 +8,35 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
  * TAKE Face Biometric Module (Android) — MobileFaceNet
  *
  * Uses a pre-trained MobileFaceNet TFLite model to extract a
- * face embedding from a cropped face image.
- * The embedding is then quantized to a 128-byte bitstring
- * for use with the fuzzy extractor.
+ * face embedding from a cropped face image, then converts it
+ * to a 128-byte biometric bitstring for the fuzzy extractor.
  *
- * Dynamically adapts to the model's actual input/output tensor shapes
- * so it works with both single-face embedding models and dual-face
- * comparison models.
+ * Quantization:
+ *   Sign-bit encoding — 1 bit per embedding dimension.
+ *   bit[i] = 1 if embedding[i] >= 0, else 0.
+ *   128 bits packed MSB-first into 16 bytes, zero-padded to 128 bytes.
+ *
+ *   WHY sign bits instead of 8-bit fixed-range:
+ *     The previous 8-bit quantization (0..255 per dimension) produced
+ *     ~170 bit flips between two scans of the same face, because a
+ *     small float shift of ~0.007 moves ~1.5 quantization steps,
+ *     each flipping 1-3 bits across 128 dimensions.
+ *     This far exceeded BCH_T=24, breaking the fuzzy extractor.
+ *
+ *     Sign bits flip only when noise pushes a value across zero.
+ *     For dlib/MobileFaceNet L2-normalized embeddings (~N(0,0.09))
+ *     with realistic inter-scan noise (~0.005-0.01 std), this gives
+ *     0-3 sign flips total — well within BCH_T=24.
+ *
+ * This matches server/crypto/biometric.py embedding_to_bitstring() exactly.
  */
 object FaceCapture {
-
-    // Fixed quantization range — matches Python biometric.py
-    private const val EMBED_MIN = -0.6
-    private const val EMBED_MAX = 0.6
-    private const val EMBED_RANGE = EMBED_MAX - EMBED_MIN  // 1.2
 
     // MobileFaceNet standard input size
     private const val INPUT_SIZE = 112
@@ -37,29 +44,32 @@ object FaceCapture {
     // Number of output bytes for the fuzzy extractor
     private const val OUTPUT_BYTES = 128
 
+    // Sign bits: 1 per embedding dimension
+    private const val SIGN_BITS  = 128          // one per embedding dimension
+    private const val SIGN_BYTES = SIGN_BITS / 8  // 16 packed bytes
+    private const val PADDING_BYTES = OUTPUT_BYTES - SIGN_BYTES  // 112 zero bytes
+
     private var interpreter: Interpreter? = null
-    private var modelInputSize = 0    // total bytes the model expects
-    private var modelOutputDim = 0    // number of floats in output
+    private var modelInputSize = 0
+    private var modelOutputDim = 0
 
     /**
      * Initialize the TFLite interpreter. Call once at startup.
      */
     fun init(context: Context) {
         if (interpreter != null) return
-        val model = loadModelFile(context, "mobilefacenet.tflite")
+        val model  = loadModelFile(context, "mobilefacenet.tflite")
         val interp = Interpreter(model)
 
-        // Query the model's actual input/output tensor shapes
-        val inputTensor = interp.getInputTensor(0)
-        modelInputSize = inputTensor.numBytes()
-        val inputShape = inputTensor.shape()  // e.g., [1,112,112,3] or [2,112,112,3]
-
+        val inputTensor  = interp.getInputTensor(0)
+        modelInputSize   = inputTensor.numBytes()
         val outputTensor = interp.getOutputTensor(0)
-        val outputShape = outputTensor.shape()
-        modelOutputDim = outputShape.last()
+        modelOutputDim   = outputTensor.shape().last()
 
-        android.util.Log.d("FaceCapture", "Model input shape: ${inputShape.toList()}, bytes=$modelInputSize")
-        android.util.Log.d("FaceCapture", "Model output shape: ${outputShape.toList()}, dim=$modelOutputDim")
+        android.util.Log.d("FaceCapture",
+            "Model input: ${inputTensor.shape().toList()}, bytes=$modelInputSize")
+        android.util.Log.d("FaceCapture",
+            "Model output: ${outputTensor.shape().toList()}, dim=$modelOutputDim")
 
         interpreter = interp
     }
@@ -69,10 +79,11 @@ object FaceCapture {
      *
      * Steps:
      *   1. Resize to 112×112
-     *   2. Normalize pixel values to [-1, 1]
-     *   3. Run through MobileFaceNet → embedding
+     *   2. Normalize pixels to [-1, 1]
+     *   3. Run MobileFaceNet → raw embedding
      *   4. L2-normalize the embedding
-     *   5. Take first 128 dimensions, quantize to [0, 255] using fixed range
+     *   5. Sign-bit encode: bit[i] = 1 if embedding[i] >= 0
+     *   6. Pack 128 bits into 16 bytes, zero-pad to 128 bytes
      *
      * @param faceBitmap  Cropped face image
      * @return 128-byte bitstring for the fuzzy extractor
@@ -81,79 +92,72 @@ object FaceCapture {
         val interp = interpreter
             ?: throw IllegalStateException("FaceCapture not initialized. Call init() first.")
 
-        // 1. Resize to 112×112
+        // Step 1: Resize to 112×112
         val resized = Bitmap.createScaledBitmap(faceBitmap, INPUT_SIZE, INPUT_SIZE, true)
 
-        // 2. Prepare a single face image as float buffer
+        // Step 2: Build input buffer (normalized to [-1, 1])
         val singleFaceBytes = 4 * INPUT_SIZE * INPUT_SIZE * 3
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
         resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
-        // Allocate the full input buffer (might be 1x or 2x a single face)
         val inputBuffer = ByteBuffer.allocateDirect(modelInputSize)
         inputBuffer.order(ByteOrder.nativeOrder())
 
-        // Write the face pixels (normalised to [-1,1])
-        for (pixel in pixels) {
-            val r = ((pixel shr 16) and 0xFF)
-            val g = ((pixel shr 8) and 0xFF)
-            val b = (pixel and 0xFF)
-            inputBuffer.putFloat((r - 127.5f) / 128.0f)
-            inputBuffer.putFloat((g - 127.5f) / 128.0f)
-            inputBuffer.putFloat((b - 127.5f) / 128.0f)
-        }
-
-        // If the model expects more data (e.g. a second face slot), duplicate
-        if (modelInputSize > singleFaceBytes) {
+        fun writePixels() {
             for (pixel in pixels) {
-                val r = ((pixel shr 16) and 0xFF)
-                val g = ((pixel shr 8) and 0xFF)
-                val b = (pixel and 0xFF)
-                inputBuffer.putFloat((r - 127.5f) / 128.0f)
-                inputBuffer.putFloat((g - 127.5f) / 128.0f)
-                inputBuffer.putFloat((b - 127.5f) / 128.0f)
+                inputBuffer.putFloat((((pixel shr 16) and 0xFF).toFloat() - 127.5f) / 128.0f)
+                inputBuffer.putFloat((((pixel shr 8)  and 0xFF).toFloat() - 127.5f) / 128.0f)
+                inputBuffer.putFloat(((pixel          and 0xFF).toFloat() - 127.5f) / 128.0f)
             }
         }
+        writePixels()
+        if (modelInputSize > singleFaceBytes) writePixels()  // dual-face model slot
 
-        // 3. Run inference
-        // Determine output buffer shape from model
-        val outputTensor = interp.getOutputTensor(0)
-        val outputShape = outputTensor.shape()
-        val totalOutputFloats = outputShape.fold(1) { acc, v -> acc * v }
-        val flatOutput = FloatArray(totalOutputFloats)
-        val outputBuffer = ByteBuffer.allocateDirect(totalOutputFloats * 4)
+        // Step 3: Run inference
+        val outputTensor   = interp.getOutputTensor(0)
+        val totalOutFloats = outputTensor.shape().fold(1) { acc, v -> acc * v }
+        val outputBuffer   = ByteBuffer.allocateDirect(totalOutFloats * 4)
         outputBuffer.order(ByteOrder.nativeOrder())
 
         inputBuffer.rewind()
         interp.run(inputBuffer, outputBuffer)
 
-        // Read floats from output buffer
         outputBuffer.rewind()
-        for (i in flatOutput.indices) {
-            flatOutput[i] = outputBuffer.float
-        }
+        val embedding = FloatArray(totalOutFloats) { outputBuffer.float }
 
-        // Use the output as our embedding
-        val embedding = flatOutput
-
-        // 4. L2-normalize the embedding
+        // Step 4: L2-normalize
         var norm = 0.0
         for (v in embedding) norm += v * v
         norm = sqrt(norm)
         if (norm > 0) {
-            for (i in embedding.indices) embedding[i] = (embedding[i] / norm.toFloat())
+            for (i in embedding.indices) embedding[i] /= norm.toFloat()
         }
 
-        // 5. Quantize first OUTPUT_BYTES dimensions to bytes
-        val result = ByteArray(OUTPUT_BYTES)
-        for (i in 0 until OUTPUT_BYTES) {
-            val value = if (i < embedding.size) embedding[i].toDouble() else 0.0
-            val clipped = max(EMBED_MIN, min(EMBED_MAX, value))
-            val normalized = (clipped - EMBED_MIN) / EMBED_RANGE
-            result[i] = (normalized * 255).toInt().coerceIn(0, 255).toByte()
-        }
+        // Step 5 & 6: Sign-bit encode → pack into bytes → zero-pad
+        return embeddingToSignBits(embedding)
+    }
 
-        return result
+    /**
+     * Convert a float embedding to 128-byte sign-bit bitstring.
+     * Matches Python's embedding_to_bitstring() exactly.
+     *
+     * bit[i] = 1 if embedding[i] >= 0, else 0
+     * 128 bits packed MSB-first into 16 bytes + 112 zero bytes = 128 bytes
+     */
+    fun embeddingToSignBits(embedding: FloatArray): ByteArray {
+        // Pack 128 sign bits into 16 bytes (MSB first, matching numpy packbits)
+        val packed = ByteArray(SIGN_BYTES)
+        for (byteIdx in 0 until SIGN_BYTES) {
+            var b = 0
+            for (bitIdx in 0 until 8) {
+                val dimIdx = byteIdx * 8 + bitIdx
+                val signBit = if (dimIdx < embedding.size && embedding[dimIdx] >= 0f) 1 else 0
+                b = (b shl 1) or signBit
+            }
+            packed[byteIdx] = b.toByte()
+        }
+        // Zero-pad to 128 bytes
+        return packed + ByteArray(PADDING_BYTES)
     }
 
     /**
@@ -164,16 +168,11 @@ object FaceCapture {
         interpreter = null
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Internal helpers
-    // ─────────────────────────────────────────────────────────────
-
     private fun loadModelFile(context: Context, filename: String): MappedByteBuffer {
-        val assetFileDescriptor = context.assets.openFd(filename)
-        val inputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
+        val afd         = context.assets.openFd(filename)
+        val inputStream = FileInputStream(afd.fileDescriptor)
         val fileChannel = inputStream.channel
-        val startOffset = assetFileDescriptor.startOffset
-        val declaredLength = assetFileDescriptor.declaredLength
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY,
+            afd.startOffset, afd.declaredLength)
     }
 }

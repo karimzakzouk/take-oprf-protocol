@@ -13,7 +13,7 @@ __pycache__/
 venv/
 env/
 .env
-
+*__pycache__/
 # Terraform
 .terraform/
 *.tfstate
