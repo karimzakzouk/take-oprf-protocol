@@ -286,7 +286,7 @@ class RegisterActivity : AppCompatActivity() {
     }
 
     companion object {
-        const val DEFAULT_SERVER_URL = "http://18.208.209.212:5000"
+        const val DEFAULT_SERVER_URL = "http://3.239.210.112:5000"
         const val PREFS_NAME = "take_prefs"
         const val PREF_BIO_MODE = "bio_mode"
     }
