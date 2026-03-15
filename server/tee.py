@@ -65,7 +65,7 @@ def _get_local_master_key() -> bytes:
         if not key_hex:
             raise RuntimeError(
                 "TAKE_MASTER_KEY is not set. "
-                "Set it to a 64-char hex string (32 bytes). "
+                "Set it to a 28-char hex string (14 bytes). "
                 "In production, use TAKE_USE_ENCLAVE=true instead."
             )
         _local_master_key = bytes.fromhex(key_hex)
@@ -155,7 +155,7 @@ def tee_register_oprf(id_u, blinded: int) -> int:
         return int(result["result"])
     else:
         k = _get_local_master_key()
-        id_bytes = _idu_4bytes(id_u)
+        id_bytes = id_u
         k1 = H1(k + id_bytes)
         k2 = H2(k + id_bytes)
         k2_inv = pow(k2, -1, GROUP_ORDER)
@@ -180,7 +180,7 @@ def tee_auth_oprf(id_u, blinded: int) -> int:
         return int(result["result"])
     else:
         k = _get_local_master_key()
-        id_bytes = _idu_4bytes(id_u)
+        id_bytes = id_u
         k1 = H1(k + id_bytes)
         return mod_exp(blinded, k1, Q)
 
@@ -202,7 +202,7 @@ def tee_auth_credential(id_u, credential: int) -> int:
         return int(result["result"])
     else:
         k = _get_local_master_key()
-        id_bytes = _idu_4bytes(id_u)
+        id_bytes = id_u
         k2 = H2(k + id_bytes)
         return mod_exp(credential, k2, Q)
 
