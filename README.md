@@ -173,7 +173,6 @@ const val DEFAULT_SERVER_URL = "http://<your-ec2-ip>:5000"
 ## Running Tests
 
 ```bash
-cd take-oprf-protocol
 source venv/bin/activate
 export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 pytest tests/ -v
