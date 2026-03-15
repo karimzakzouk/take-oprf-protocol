@@ -303,7 +303,7 @@ def Gen(bio: bytes) -> tuple[bytes, bytes]:
         P -- public helper string (128 bytes = 1024 bits), stored on server
 
     P contains only the BCH syndrome of bio, leaking at most
-    2t * log2(GF_SIZE) = 640 bits of structural information -- significantly
+    2t * log2(GF_SIZE) = 480 bits of structural information -- significantly
     less than the old XOR-mask implementation which stored bio directly.
     """
     if len(bio) != BIO_BYTES:

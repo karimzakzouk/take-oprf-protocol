@@ -25,7 +25,7 @@ import socket
 import base64
 import subprocess
 from server.crypto.primitives import H1, H2, mod_exp, GROUP_ORDER, Q
-
+from Crypto.Hash import SHA3_256 as _SHA3
 from typing import Optional
 
 # ─────────────────────────────────────────────────────
@@ -69,8 +69,8 @@ def _get_local_master_key() -> bytes:
                 "In production, use TAKE_USE_ENCLAVE=true instead."
             )
         _local_master_key = bytes.fromhex(key_hex)
-        if len(_local_master_key) != 32:
-            raise RuntimeError("TAKE_MASTER_KEY must be exactly 32 bytes (64 hex chars)")
+        if len(_local_master_key) != 14:
+            raise RuntimeError("TAKE_MASTER_KEY must be exactly 14 bytes (28 hex chars)")
     return _local_master_key
 
 
@@ -120,7 +120,13 @@ def _to_bytes(id_u) -> bytes:
 
 def _id_u_b64(id_u) -> str:
     """Encode id_u as base64 string for enclave protocol."""
-    return base64.b64encode(_to_bytes(id_u)).decode()
+    return base64.b64encode(_idu_4bytes(id_u)).decode()
+
+
+def _idu_4bytes(id_u) -> bytes:
+    """Derive 4-byte cryptographic IDU from username. Paper Table II: IDU = 32 bits."""
+    raw = id_u.encode() if isinstance(id_u, str) else id_u
+    return _SHA3.new(raw).digest()[:4]
 
 
 # ─────────────────────────────────────────────────────
@@ -149,7 +155,7 @@ def tee_register_oprf(id_u, blinded: int) -> int:
         return int(result["result"])
     else:
         k = _get_local_master_key()
-        id_bytes = _to_bytes(id_u)
+        id_bytes = _idu_4bytes(id_u)
         k1 = H1(k + id_bytes)
         k2 = H2(k + id_bytes)
         k2_inv = pow(k2, -1, GROUP_ORDER)
@@ -174,7 +180,7 @@ def tee_auth_oprf(id_u, blinded: int) -> int:
         return int(result["result"])
     else:
         k = _get_local_master_key()
-        id_bytes = _to_bytes(id_u)
+        id_bytes = _idu_4bytes(id_u)
         k1 = H1(k + id_bytes)
         return mod_exp(blinded, k1, Q)
 
@@ -196,7 +202,7 @@ def tee_auth_credential(id_u, credential: int) -> int:
         return int(result["result"])
     else:
         k = _get_local_master_key()
-        id_bytes = _to_bytes(id_u)
+        id_bytes = _idu_4bytes(id_u)
         k2 = H2(k + id_bytes)
         return mod_exp(credential, k2, Q)
 

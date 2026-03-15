@@ -268,7 +268,7 @@ class LoginActivity : AppCompatActivity() {
         onProgress("Verifying Server Authentication (σ1/σ2)...")
         val sigma1 = TakeCrypto.H3(
             TakeCrypto.concat(
-                idU.toByteArray(),
+                TakeCrypto.iduBytes(idU),
                 idS.toByteArray(),
                 X, Y, shared, cPrime
             )
@@ -280,7 +280,7 @@ class LoginActivity : AppCompatActivity() {
 
         val sigma2Expected = TakeCrypto.H4(
             TakeCrypto.concat(
-                idU.toByteArray(),
+                TakeCrypto.iduBytes(idU),
                 idS.toByteArray(),
                 X, Y, shared, cPrime
             )
@@ -292,7 +292,7 @@ class LoginActivity : AppCompatActivity() {
 
         return TakeCrypto.H5(
             TakeCrypto.concat(
-                idU.toByteArray(),
+                TakeCrypto.iduBytes(idU),
                 idS.toByteArray(),
                 X, Y, shared, cPrime
             )

@@ -150,7 +150,7 @@ python -m infra.enclave.enclave_server
 
 # Terminal 2 — Flask API
 export TAKE_USE_ENCLAVE=true
-export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(14))")
 python -m server.app
 ```
 
@@ -174,7 +174,7 @@ const val DEFAULT_SERVER_URL = "http://<your-ec2-ip>:5000"
 
 ```bash
 source venv/bin/activate
-export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(14))")
 pytest tests/ -v
 ```
 

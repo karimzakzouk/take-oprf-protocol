@@ -267,7 +267,7 @@ resource "aws_instance" "take_server" {
       "cd /home/ec2-user/take-oprf-protocol",
       "pip3 install -r requirements.txt",
 
-      "TAKE_MASTER_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')",
+      "TAKE_MASTER_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(14))')",
       "echo \"TAKE_MASTER_KEY=$TAKE_MASTER_KEY\" >> /home/ec2-user/.bashrc",
       "sudo rm -f /home/ec2-user/.take_master_key",
       "echo \"$TAKE_MASTER_KEY\" > /home/ec2-user/.take_master_key",

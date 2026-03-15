@@ -147,7 +147,7 @@ def capture_face_embedding(camera_index: int = 0,
 #   zero. For dlib embeddings (roughly N(0, 0.09) per dimension) and realistic
 #   inter-scan noise (~0.005-0.01 std), the probability of a sign flip per
 #   dimension is ~1-2%, yielding 1-3 total bit flips across 128 dimensions.
-#   This is well within BCH_T=32.
+#   This is well within BCH_T=24.
 #
 # Encoding layout (128 bytes total):
 #   Bytes  0-15: 128 sign bits packed (1 bit per embedding dimension)

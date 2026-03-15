@@ -101,8 +101,8 @@ def handle_request(data: dict) -> dict:
         if not key_hex:
             return {"error": "Missing master_key_hex"}
         _master_key = bytes.fromhex(key_hex)
-        if len(_master_key) != 32:
-            return {"error": "Master key must be 32 bytes"}
+        if len(_master_key) != 14:
+            return {"error": "Master key must be 14 bytes"}
         print("[enclave] Master key sealed.")
         return {"status": "sealed"}
 

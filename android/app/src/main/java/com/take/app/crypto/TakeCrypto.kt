@@ -101,6 +101,9 @@ object TakeCrypto {
         }
     }
 
+    fun iduBytes(username: String): ByteArray =
+        sha3_256(username.toByteArray()).take(4).toByteArray()
+
     // ─────────────────────────────────────────────────────────────
     // COMBINED FACTOR: H0(pw || R)
     // ─────────────────────────────────────────────────────────────

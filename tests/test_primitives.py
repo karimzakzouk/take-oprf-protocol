@@ -6,6 +6,8 @@ Run with: pytest tests/test_primitives.py -v
 import pytest
 import sys
 import os
+from Crypto.Hash import SHA3_256
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from server.crypto.primitives import (
@@ -221,11 +223,11 @@ class TestTAKEProtocolCrypto:
         No networking — just verifies all math is correct.
         """
         # ── Setup ──────────────────────────────────────────
-        IDU = b"user001"
+        IDU = SHA3_256.new(b"user001").digest()[:4]
         IDS = b"server001"
         password = "mySecurePassword!"
         R = b"biometric_secret_R_value_here_32"  # from fuzzy extractor
-        master_key = b"server_master_key_secret_112bits"
+        master_key = b"secret_key_14b"  # 14 bytes exactly
 
         # Server derives k1 and k2 from master key
         k1 = H1(master_key + IDU)
