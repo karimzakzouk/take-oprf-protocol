@@ -1,2 +1,6 @@
 flask
 pycryptodome
+numpy
+opencv-python
+dlib
+pytest

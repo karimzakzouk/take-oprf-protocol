@@ -1,68 +1,199 @@
-# TAKE: Secure Key Exchange with Biometrics & TEEs
+# TAKE — Two-Factor Authentication Key Exchange
 
-Open-source implementation of the **TAKE** authentication protocol, based on the IEEE TDSC 2024 paper *"A Secure Two-Factor Authentication Key Exchange Scheme"* by Han et al.
+A complete, production-grade implementation of the **TAKE** protocol from:
 
-This project implements the full cryptographic flow described in the paper, utilizing modern mobile native biometrics and AWS Nitro Enclaves.
+> "A Secure Two-Factor Authentication Key Exchange Scheme"  
+> *IEEE Transactions on Dependable and Secure Computing*, Vol. 21, No. 6, pp. 5681–5693, 2024.  
+> Han, Y., Xu, C., Jiang, C., & Chen, K. — [DOI: 10.1109/TDSC.2024.3382359](https://doi.org/10.1109/TDSC.2024.3382359)
+---
+
+## What is TAKE?
+
+TAKE is a two-factor authentication key exchange protocol that combines a user's **password** and **biometrics** into a single blinded credential, protected by a Trusted Execution Environment on the server. Unlike standard 2FA, TAKE establishes a full cryptographic session key between client and server — meaning authentication and secure channel setup happen in a single protocol run.
+
+The three properties that make it interesting:
+
+- **The server never sees the password or biometric** — the combined factor is blinded via an Oblivious Pseudorandom Function (OPRF) before it ever reaches the server
+- **Stealing the server database yields nothing** — credentials are 2048-bit group elements whose derivation requires keys that live exclusively inside a hardware TEE
+- **No clock synchronisation needed** — freshness is guaranteed by per-session random values, not timestamps
+
+---
 
 ## Architecture
 
-The protocol secures authentication by ensuring the server cannot decrypt user credentials and the client cannot bypass biometric verification.
+```
+┌──────────────────────────────────┐              ┌────────────────────────────────────────┐
+│          Android Client          │              │             AWS EC2 Server             │
+│                                  │              │                                        │
+│  Biometric Layer                 │              │  Flask REST API                        │
+│  ┌──────────────────────────┐    │   HTTPS/TLS  │  ┌──────────────────────────────────┐  │
+│  │ Face Mode                │    │ ◄──────────► │  │ /register/init                   │  │
+│  │ MobileFaceNet (TFLite)   │    │              │  │ /register/finalize               │  │
+│  │ + Fuzzy Extractor        │    │              │  │ /auth/init                       │  │
+│  │ Gen(bio) -> (R, P)       │    │              │  │ /auth/oprf                       │  │
+│  │ Rep(bio', P) -> R        │    │              │  │ /auth/verify                     │  │
+│  ├──────────────────────────┤    │              │  └───────────────┬──────────────────┘  │
+│  │ Fingerprint Mode         │    │              │                  │ vsock only          │
+│  │ Android Keystore (TEE)   │    │              │  ┌───────────────▼──────────────────┐  │
+│  │ BiometricPrompt          │    │              │  │   AWS Nitro Enclave (TEE)        │  │
+│  └──────────────────────────┘    │              │  │                                  │  │
+│                                  │              │  │  k1 = H1(k || IDu)               │  │
+│  Crypto Layer                    │              │  │  k2 = H2(k || IDu)               │  │
+│  ┌──────────────────────────┐    │              │  │                                  │  │
+│  │ TakeCrypto.kt            │    │              │  │  All key-dependent modular       │  │
+│  │ OPRF + DH                │    │              │  │  exponentiations run here.       │  │
+│  │ H0-H5 (SHA-3)            │    │              │  │  k1 and k2 never leave           │  │
+│  │ 2048-bit RFC 3526 group  │    │              │  │  enclave memory.                 │  │
+│  │ Bouncy Castle            │    │              │  └──────────────────────────────────┘  │
+│  └──────────────────────────┘    │              │                                        │
+└──────────────────────────────────┘              └────────────────────────────────────────┘
+```
 
-* **Client (`/android`)**: An Android Kotlin application. It uses the Android hardware Keystore to securely generate and store random blinding factors ($R$) protected by the native BiometricPrompt.
-* **Server (`/server`)**: A Python Flask REST API. It handles the Oblivious Pseudorandom Function (OPRF) evaluation.
-* **TEE (`/infra/enclave`)**: The cryptographic core. We use an **AWS Nitro Enclave** to derive the specific master keys ($k_1$, $k_2$) used to blind credentials. The master keys never leave the enclave's isolated, hardware-encrypted memory.
-* **Infrastructure (`/infra`)**: Terraform scripts to automatically provision an `m5.xlarge` EC2 instance, configure the Nitro Enclave allocator, and deploy the server.
+---
 
-> **Implementation Note on Biometrics**: The original paper describes using a software *Fuzzy Extractor* to reliably derive a cryptographic key from noisy biometric inputs (like a facial scan). In this modern mobile deployment, we achieve the exact same cryptographic goal by utilizing the Android device's hardware TEE (the Android Keystore). The native fingerprint scanner unlocks a master blinding factor ($R$) stored securely in hardware. This provides identical mathematical guarantees for the protocol while leveraging industry-standard hardware security over error-prone software extraction.
+## Authentication Modes
 
-> **Implementation Note on TEEs**: The original TAKE paper proposes using **Intel SGX** as the Trusted Execution Environment. This project substitutes SGX with **AWS Nitro Enclaves**, a modern, cloud-native hardware isolation technology. Nitro Enclaves provide the exact same mathematical security guarantees—preventing even a root-level attacker on the host OS from accessing the master cryptographic keys—while being significantly easier to deploy and scale in a standard cloud environment.
+The app ships with two biometric modes, selectable from the UI.
 
-## Live Breach Demonstration (`/demo`)
+### Face Mode — Paper-Faithful
+Implements the protocol exactly as specified in the paper. A **MobileFaceNet** TFLite model runs entirely on-device and extracts a compact, discriminative facial representation. This feeds into a **cryptographic fuzzy extractor** (XOR secure sketch + SHA-3) that derives the blinding factor R from the biometric — tolerating natural intra-class variation of up to ~17% bit-flip noise between scans.
 
-To verify the mathematical proofs from the paper, this repository includes a live penetration testing script `demo/server_breach_demo.py`.
+### Fingerprint Mode — Hardware TEE
+Stores R inside the **Android hardware Keystore**, protected by `BiometricPrompt` fingerprint authentication. The Android Keystore is itself a hardware TEE, satisfying the same client-side isolation assumptions the paper makes. This mode is faster and more practical for deployment.
 
-The script connects via SSH to an active AWS deployment and physically extracts the SQLite databases. It simulates a server breach where an attacker steals both:
-1. A traditional `users.db` storing `SHA256(password)`
-2. The `take_server.db` storing the protocol's OPRF-blinded group elements: $H_0(pw || R)^{(k_1 \cdot k_2^{-1}) \pmod q}$
+---
 
-The script then executes **John the Ripper** and **Hashcat** against the `rockyou.txt` dictionary locally. 
-As demonstrated, traditional hashes are cracked instantly. The TAKE credentials cannot even be parsed by cracking tools because the necessary derivation factors ($k_1$, $k_2$) remain locked inside the AWS Enclave, inaccessible even to an attacker with full root access on the host EC2 instance.
+## Server TEE — AWS Nitro Enclaves
+
+The paper specifies Intel SGX to protect the master key `k`. This project substitutes SGX with **AWS Nitro Enclaves**, which provide equivalent hardware isolation guarantees in a cloud-native environment.
+
+What runs inside the enclave:
+- The master key `k` is sealed at startup and never written to host memory
+- Per-user key derivation: `k1 = H1(k || IDu)` and `k2 = H2(k || IDu)`
+- All modular exponentiations that depend on `k1` or `k2`
+- Communication is exclusively via vsock — the enclave has no network interface
+
+An attacker with full root access on the EC2 host cannot read enclave memory, cannot intercept vsock traffic, and cannot recover `k1` or `k2`.
+
+---
+
+## Protocol Summary
+
+The implementation follows the paper across three phases.
+
+**Setup** — Public parameters include a 2048-bit safe prime `q` (RFC 3526 Group 14), generator `g = 2`, hash functions `H0: {0,1}* -> G`, `H1, H2: {0,1}* -> Z*q`, and `H3, H4, H5` as SHA-3 instances. The fuzzy extractor `(Gen, Rep)` is parameterised for the chosen biometric space.
+
+**Registration** — The client runs `Gen(bio)` to obtain `(R, P)`, computes the combined factor `H0(pw || R)`, and blinds it with a fresh random scalar before sending to the server. The server evaluates the OPRF inside the enclave and returns the blinded result. The client removes the blinding factor to obtain credential `C`, then sends `{IDu, P, C}` for storage.
+
+**Authentication and Key Exchange** — The client retrieves `P`, runs `Rep(bio', P)` to recover `R`, recomputes the combined factor, and initiates a fresh OPRF exchange alongside a Diffie-Hellman public key `X = g^x`. The server responds with its DH public key `Y = g^y` and the OPRF-evaluated value. Both sides compute the shared DH secret `g^xy`, derive authenticators `sigma1` and `sigma2` for mutual verification, and independently compute the session key `SK = H5(IDu || IDs || X || Y || g^xy || C')`.
+
+---
+
+## Security Properties
+
+| Goal | Mechanism |
+|------|-----------|
+| No password exposure | Password is never transmitted; OPRF blinds it client-side before any server interaction |
+| Offline guessing resistance | Credentials require `k1 * k2^-1` from the enclave — brute force is computationally infeasible without it |
+| Replay resistance | Per-session fresh random `r'`; sessions are single-use and expire server-side |
+| Mutual authentication | `sigma1` lets the server verify the client; `sigma2` lets the client verify the server |
+| Forward secrecy | Session key includes ephemeral DH value `g^xy`; compromise of long-term keys does not expose past sessions |
+| Server breach safety | Stolen database plus full root access yields only OPRF-blinded group elements — uncrackable without the enclave-held `k1`, `k2` |
+
+The formal security proof, under the random oracle model and the Computational Diffie-Hellman assumption, is given in Section V of the paper.
+
+---
+
+## Live Breach Demonstration
+
+`demo/server_breach_demo.py` is a real penetration testing script. It SSHs into the active AWS deployment, exfiltrates both a traditional SHA-256 credential database and the TAKE database, then runs **John the Ripper** and **Hashcat** with the `rockyou.txt` wordlist against both.
+
+The result is the same every time: traditional password hashes can be cracked. TAKE credentials cannot be parsed by either tool — they are 2048-bit OPRF-blinded group elements, and the derivation factors `k1`, `k2` remain locked inside the Nitro Enclave regardless of how the host is compromised.
+
+```bash
+export TAKE_SERVER_IP=<your-ec2-ip>
+export TAKE_SSH_KEY=./infra/my-key.pem
+python3 demo/server_breach_demo.py
+```
+When a user registers through the Android app, their credentials are automatically saved to **two separate databases** on the server:
+
+- `traditional_users.db` — stores a plain `SHA256(password)`, the way most apps work
+- `take_server.db` — stores the OPRF-blinded credential from the TAKE protocol
+
+This makes the breach demo a direct, side-by-side comparison on real data from the same users.
+---
 
 ## Getting Started
 
-### 1. Infrastructure (AWS EC2 & Nitro Enclaves)
+### Prerequisites
+- AWS account with EC2 access
+- Terraform >= 1.0
+- Android Studio
+- Python 3.11+
+
+### 1. Deploy Infrastructure
+
 ```bash
 cd infra/
 terraform init
-terraform plan
-terraform apply
+terraform apply -var="key_name=<your-key-pair>"
 ```
-This will automatically provision the EC2 instance, install Docker and the Nitro Enclave CLI, generate the master keys, and build the enclave image.
 
-### 2. Server (Python Flask)
-SSH into the newly created EC2 instance:
+Provisions an `m5.xlarge` EC2 instance with Nitro Enclaves enabled, builds the enclave image, and starts the server automatically.
+
+### 2. Run Server Locally (Development)
+
 ```bash
-ssh -i infra/<key>.pem ec2-user@<public_ip>
-cd take-project
-python3 -m server.app
+# Terminal 1 — enclave process
+export TAKE_ENCLAVE_CID=16
+python -m infra.enclave.enclave_server
+
+# Terminal 2 — Flask API
+export TAKE_USE_ENCLAVE=true
+export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+python -m server.app
 ```
-*Note: The traditional and TAKE SQLite databases will be automatically created on first run.*
 
-### 3. Client (Android)
-Before building, open `android/app/src/main/java/com/take/app/ui/LoginActivity.kt` and `RegisterActivity.kt`, and replace `http://10.0.2.2:5000` with the public IP address of your EC2 instance.
+### 3. Build and Install the Android App
 
-Ensure your emulator or physical device has a fingerprint enrolled. Then build the application:
 ```bash
 cd android/
 ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Copyright Notice
+## Note
 
-The original mathematical equations, definitions, and protocol flow are the intellectual property of the authors. 
+Before building the Android app, update the server IP in `RegisterActivity.kt`:
+```kotlin
+const val DEFAULT_SERVER_URL = "http://<your-ec2-ip>:5000"
+```
+---
 
-To comply with copyright, the IEEE paper itself is not distributed in this repository. Researchers with academic access can find the original publication on IEEE Xplore:
-> Han et al., "A Secure Two-Factor Authentication Key Exchange Scheme", IEEE Transactions on Dependable and Secure Computing (TDSC), 2024.
+## Running Tests
 
-This repository is an independent, clean-room software implementation intended for academic verification and educational use.
+```bash
+cd take-oprf-protocol
+source venv/bin/activate
+export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+pytest tests/ -v
+```
+
+The test suite covers cryptographic primitives, the fuzzy extractor, and full end-to-end registration and authentication flows including attack scenarios (wrong password, replay, account lockout).
+
+---
+
+## Paper Reference
+
+> Yunxia Han, Chunxiang Xu, Changsong Jiang, Kefei Chen.
+> "A Secure Two-Factor Authentication Key Exchange Scheme."
+> *IEEE Transactions on Dependable and Secure Computing*, Vol. 21, No. 6, pp. 5681–5693, November/December 2024.
+> DOI: [10.1109/TDSC.2024.3382359](https://doi.org/10.1109/TDSC.2024.3382359)
+
+The paper is published by IEEE and is available via institutional access on IEEE Xplore. It is not redistributed in this repository. This is an independent academic implementation for educational and verification purposes only.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.

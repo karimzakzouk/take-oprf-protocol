@@ -3,6 +3,12 @@ package com.take.app.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.os.Bundle
 import android.util.Base64
 import android.util.Size
@@ -14,10 +20,11 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.facemesh.FaceMeshDetection
-import com.google.mlkit.vision.facemesh.FaceMeshDetector
-import com.take.app.R
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetector
+import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.take.app.crypto.FaceCapture
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import android.view.ViewGroup
@@ -26,9 +33,10 @@ import android.widget.TextView
 
 /**
  * Camera activity for face biometric capture.
- * Opens front camera → detects face mesh → computes bitstring → returns result.
+ * Opens front camera → detects face → crops → runs MobileFaceNet →
+ * returns 128-byte biometric bitstring via Intent extras.
  *
- * Returns the 128-byte biometric bitstring via Intent extras:
+ * Returns:
  *   "bio_bitstring" → Base64-encoded 128-byte bitstring
  */
 class FaceCaptureActivity : AppCompatActivity() {
@@ -42,14 +50,17 @@ class FaceCaptureActivity : AppCompatActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var statusText: TextView
     private lateinit var cameraExecutor: ExecutorService
-    private lateinit var faceMeshDetector: FaceMeshDetector
+    private lateinit var faceDetector: FaceDetector
 
-    private var captured = false  // Prevent multiple captures
+    private var captured = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Build layout programmatically (no XML needed for this simple view)
+        // Initialize MobileFaceNet
+        FaceCapture.init(this)
+
+        // Build layout programmatically
         val rootLayout = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -85,7 +96,13 @@ class FaceCaptureActivity : AppCompatActivity() {
         setContentView(rootLayout)
 
         cameraExecutor = Executors.newSingleThreadExecutor()
-        faceMeshDetector = FaceCapture.createDetector()
+
+        // ML Kit Face Detection (just for bounding box — not mesh)
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setMinFaceSize(0.3f)
+            .build()
+        faceDetector = FaceDetection.getClient(options)
 
         if (hasCameraPermission()) {
             startCamera()
@@ -126,12 +143,10 @@ class FaceCaptureActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
-            // Preview
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-            // Image analysis for face mesh detection
             val imageAnalysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -141,7 +156,6 @@ class FaceCaptureActivity : AppCompatActivity() {
                 processImage(imageProxy)
             }
 
-            // Use front camera
             val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
 
             try {
@@ -175,30 +189,37 @@ class FaceCaptureActivity : AppCompatActivity() {
             imageProxy.imageInfo.rotationDegrees
         )
 
-        faceMeshDetector.process(inputImage)
-            .addOnSuccessListener { faceMeshes ->
-                if (faceMeshes.isNotEmpty() && !captured) {
-                    val mesh = faceMeshes[0]
-                    val meshPoints = mesh.allPoints
+        faceDetector.process(inputImage)
+            .addOnSuccessListener { faces ->
+                if (faces.isNotEmpty() && !captured) {
+                    val face = faces[0]
+                    val bounds = face.boundingBox
 
                     try {
-                        val bitstring = FaceCapture.meshToBitstring(meshPoints)
-                        captured = true
+                        // Convert ImageProxy to Bitmap
+                        val bitmap = imageProxyToBitmap(imageProxy)
+                        if (bitmap != null) {
+                            // Crop face region with some padding
+                            val cropped = cropFace(bitmap, bounds)
+                            if (cropped != null) {
+                                // Run MobileFaceNet to get 128-byte bitstring
+                                val bitstring = FaceCapture.bitmapToBitstring(cropped)
+                                captured = true
 
-                        runOnUiThread {
-                            statusText.text = "Face captured ✅"
-                        }
+                                runOnUiThread {
+                                    statusText.text = "Face captured ✅"
+                                }
 
-                        // Return result after short delay for UX
-                        previewView.postDelayed({
-                            val resultIntent = Intent().apply {
-                                putExtra(EXTRA_BIO_BITSTRING,
-                                    Base64.encodeToString(bitstring, Base64.NO_WRAP))
+                                previewView.postDelayed({
+                                    val resultIntent = Intent().apply {
+                                        putExtra(EXTRA_BIO_BITSTRING,
+                                            Base64.encodeToString(bitstring, Base64.NO_WRAP))
+                                    }
+                                    setResult(RESULT_OK, resultIntent)
+                                    finish()
+                                }, 500)
                             }
-                            setResult(RESULT_OK, resultIntent)
-                            finish()
-                        }, 500)
-
+                        }
                     } catch (e: Exception) {
                         runOnUiThread {
                             statusText.text = "Detection error: ${e.message}\nKeep your face centered..."
@@ -206,17 +227,71 @@ class FaceCaptureActivity : AppCompatActivity() {
                     }
                 }
             }
-            .addOnFailureListener { e ->
-                // Silently continue — next frame will try again
-            }
+            .addOnFailureListener { /* next frame will retry */ }
             .addOnCompleteListener {
                 imageProxy.close()
             }
     }
 
+    /**
+     * Convert ImageProxy (YUV_420_888) to Bitmap.
+     */
+    @androidx.camera.core.ExperimentalGetImage
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
+        val image = imageProxy.image ?: return null
+        val yBuffer = image.planes[0].buffer
+        val uBuffer = image.planes[1].buffer
+        val vBuffer = image.planes[2].buffer
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+        yBuffer.get(nv21, 0, ySize)
+        vBuffer.get(nv21, ySize, vSize)
+        uBuffer.get(nv21, ySize + vSize, uSize)
+
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
+        val out = ByteArrayOutputStream()
+        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 90, out)
+        val bytes = out.toByteArray()
+
+        var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+
+        // Apply rotation
+        val rotation = imageProxy.imageInfo.rotationDegrees
+        if (rotation != 0) {
+            val matrix = Matrix()
+            matrix.postRotate(rotation.toFloat())
+            bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        }
+
+        return bitmap
+    }
+
+    /**
+     * Crop face from bitmap with 20% padding around bounding box.
+     */
+    private fun cropFace(bitmap: Bitmap, bounds: Rect): Bitmap? {
+        val padding = (bounds.width() * 0.2).toInt()
+
+        val left   = maxOf(0, bounds.left - padding)
+        val top    = maxOf(0, bounds.top - padding)
+        val right  = minOf(bitmap.width, bounds.right + padding)
+        val bottom = minOf(bitmap.height, bounds.bottom + padding)
+
+        val width = right - left
+        val height = bottom - top
+
+        if (width <= 0 || height <= 0) return null
+
+        return Bitmap.createBitmap(bitmap, left, top, width, height)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
-        faceMeshDetector.close()
+        faceDetector.close()
     }
 }

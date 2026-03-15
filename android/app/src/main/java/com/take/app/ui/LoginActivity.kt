@@ -1,5 +1,6 @@
 package com.take.app.ui
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.util.Base64
@@ -7,6 +8,7 @@ import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.take.app.R
 import com.take.app.crypto.FuzzyExtractor
 import com.take.app.crypto.KeystoreManager
 import com.take.app.crypto.TakeCrypto
@@ -16,7 +18,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.math.BigInteger
-import com.take.app.R
 
 /**
  * Login screen — supports two biometric modes:
@@ -34,14 +35,23 @@ class LoginActivity : AppCompatActivity() {
     private lateinit var keystoreManager: KeystoreManager
     private lateinit var apiClient: TakeApiClient
 
+    private var isFaceMode = false
+    private var pendingHelperP: ByteArray? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityLoginBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         keystoreManager = KeystoreManager(this)
-        apiClient = TakeApiClient(RegisterActivity.SERVER_URL)
-        
+        apiClient = TakeApiClient(getServerUrl())
+
+        binding.toggleBioMode.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                isFaceMode = (checkedId == R.id.btnFaceMode)
+            }
+        }
+
         binding.btnLogin.setOnClickListener { startLogin() }
     }
 
@@ -58,12 +68,15 @@ class LoginActivity : AppCompatActivity() {
             return
         }
 
-        if (!keystoreManager.hasStoredR()) {
-            showError("No account found on this device. Please register first.")
-            return
+        if (isFaceMode) {
+            startFaceLogin(idU, password)
+        } else {
+            if (!keystoreManager.hasStoredR()) {
+                showError("No account found on this device. Please register first.")
+                return
+            }
+            startFingerprintLogin(idU, password)
         }
-
-        startFingerprintLogin(idU, password)
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -104,6 +117,94 @@ class LoginActivity : AppCompatActivity() {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // FACE MODE (paper-faithful: authInit → P → camera → Rep → R)
+    // ─────────────────────────────────────────────────────────────
+
+    private fun startFaceLogin(idU: String, password: String) {
+        setLoading(true, "Retrieving helper string P from server...")
+
+        // Save credentials for after camera returns
+        getSharedPreferences(RegisterActivity.PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString("pending_id_u", idU)
+            .putString("pending_password", password)
+            .apply()
+
+        lifecycleScope.launch {
+            try {
+                // Paper: S retrieves P according to IDU and returns it to U
+                val helperP = withContext(Dispatchers.IO) {
+                    apiClient.authInit(idU)
+                }
+                pendingHelperP = helperP
+
+                withContext(Dispatchers.Main) {
+                    setLoading(true, "Opening camera for face scan...")
+                }
+
+                // Launch face capture activity
+                @Suppress("DEPRECATION")
+                startActivityForResult(
+                    Intent(this@LoginActivity, FaceCaptureActivity::class.java),
+                    FaceCaptureActivity.REQUEST_CODE
+                )
+
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    setLoading(false)
+                    showError("Failed to get helper P: ${e.message}")
+                }
+            }
+        }
+    }
+
+    @Deprecated("Using deprecated API for simplicity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == FaceCaptureActivity.REQUEST_CODE) {
+            if (resultCode == RESULT_OK && data != null) {
+                val bioB64 = data.getStringExtra(FaceCaptureActivity.EXTRA_BIO_BITSTRING)
+                if (bioB64 != null) {
+                    val bio = Base64.decode(bioB64, Base64.NO_WRAP)
+                    processFaceLogin(bio)
+                } else {
+                    setLoading(false)
+                    showError("Face capture returned no data")
+                }
+            } else {
+                setLoading(false)
+                showError("Face capture cancelled")
+            }
+        }
+    }
+
+    private fun processFaceLogin(bio: ByteArray) {
+        val P = pendingHelperP
+        if (P == null) {
+            showError("No helper string P. Try again.")
+            return
+        }
+
+        setLoading(true, "Running Fuzzy Extractor Rep(bio', P)...")
+
+        val prefs = getSharedPreferences(RegisterActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        val idU      = prefs.getString("pending_id_u", "") ?: ""
+        val password = prefs.getString("pending_password", "") ?: ""
+
+        // Paper Section IV: U executes Rep(bio, P) to recover R
+        val R: ByteArray
+        try {
+            R = FuzzyExtractor.Rep(bio, P)
+        } catch (e: IllegalArgumentException) {
+            showError("Face not recognised — Rep(bio', P) failed.\n${e.message}")
+            return
+        }
+
+        binding.tvStatus.text = "Face recognised ✅ — Rep(bio', P) recovered R"
+        runAuthProtocol(idU, password, R)
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // AUTH PROTOCOL (shared by both modes)
     // ─────────────────────────────────────────────────────────────
 
@@ -137,21 +238,21 @@ class LoginActivity : AppCompatActivity() {
         // Paper Section IV — Authentication and Key Exchange
 
         onProgress("Connecting to TAKE Server...")
-        // Step 1: get P from server
-        withContext(Dispatchers.IO) {
-            apiClient.authInit(idU)
+        // In face mode, we already called authInit to get P.
+        // In fingerprint mode, we still call it for protocol completeness.
+        if (!isFaceMode) {
+            withContext(Dispatchers.IO) {
+                apiClient.authInit(idU)
+            }
         }
 
         onProgress("Computing OPRF Blind Factor...")
-        // Step 2: combined factor H0(pw || R)
         val cf = TakeCrypto.combinedFactor(password, R)
 
-        // Step 3: blind combined factor + generate DH keypair
         val (blinded, rPrime) = TakeCrypto.oprfBlind(cf)
         val (x, X)            = TakeCrypto.dhKeygen()
 
         onProgress("Sending Diffie-Hellman Key X to Server...")
-        // Step 4: send {IDU, H0(pw||R)^r', X} to server
         val oprfResult = withContext(Dispatchers.IO) {
             apiClient.authOprf(idU, blinded, X)
         }
@@ -159,11 +260,9 @@ class LoginActivity : AppCompatActivity() {
         val idS        = oprfResult.idS
 
         onProgress("Unblinding Server OPRF Response...")
-        // Step 5: unblind → C' = H0(pw||R)^k1
         val cPrime = TakeCrypto.oprfUnblind(oprfResult.oprfResponse, rPrime)
 
         onProgress("Computing Shared DH Secret (Y^x)...")
-        // Step 6: DH shared secret Y^x = g^xy
         val shared = TakeCrypto.dhShared(x, Y)
 
         onProgress("Verifying Server Authentication (σ1/σ2)...")
@@ -175,12 +274,10 @@ class LoginActivity : AppCompatActivity() {
             )
         )
 
-        // Step 8: send σ1 to server, get σ2 back
         val sigma2FromServer = withContext(Dispatchers.IO) {
             apiClient.authVerify(idU, sigma1)
         }
 
-        // Step 9: verify σ2 = H4(IDU || IDS || X || Y || Y^x || C')
         val sigma2Expected = TakeCrypto.H4(
             TakeCrypto.concat(
                 idU.toByteArray(),
@@ -193,7 +290,6 @@ class LoginActivity : AppCompatActivity() {
             throw Exception("Server authentication failed — σ2 mismatch. Possible MITM attack.")
         }
 
-        // Step 10: compute session key SK = H5(IDU || IDS || X || Y || Y^x || C')
         return TakeCrypto.H5(
             TakeCrypto.concat(
                 idU.toByteArray(),
@@ -203,7 +299,15 @@ class LoginActivity : AppCompatActivity() {
         )
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Server URL
+    // ─────────────────────────────────────────────────────────────
 
+    private fun getServerUrl(): String {
+        val prefs = getSharedPreferences(RegisterActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString("server_url", RegisterActivity.DEFAULT_SERVER_URL)
+            ?: RegisterActivity.DEFAULT_SERVER_URL
+    }
 
     // ─────────────────────────────────────────────────────────────
     // UI helpers
@@ -230,6 +334,7 @@ class LoginActivity : AppCompatActivity() {
     }
 
     private fun showError(message: String) {
+        setLoading(false)
         binding.tvStatus.text = message
         binding.tvStatus.setTextColor(getColor(android.R.color.holo_red_dark))
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()

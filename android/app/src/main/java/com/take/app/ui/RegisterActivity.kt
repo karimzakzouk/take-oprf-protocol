@@ -1,12 +1,15 @@
 package com.take.app.ui
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.util.Base64
 import android.view.View
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.take.app.R
 import com.take.app.crypto.FuzzyExtractor
 import com.take.app.crypto.KeystoreManager
 import com.take.app.crypto.TakeCrypto
@@ -20,10 +23,17 @@ import java.security.MessageDigest
 import java.math.BigInteger
 
 /**
- * Registration screen (Fingerprint only):
+ * Registration screen with Fingerprint / Face toggle.
+ *
+ * FINGERPRINT mode:
  *   R = random 32 bytes, stored in Android Keystore (hardware TEE).
  *   P = dummy 160 zero bytes (no fuzzy extractor needed).
- *   This matches Section IV of the TAKE paper.
+ *
+ * FACE mode (paper-faithful):
+ *   Camera captures face → MobileFaceNet embedding → 128-byte bio.
+ *   Gen(bio) → (R, P). Both R and P are real cryptographic values.
+ *   R is used immediately for OPRF, P is sent to server.
+ *   This matches Section IV of the TAKE paper exactly.
  */
 class RegisterActivity : AppCompatActivity() {
 
@@ -33,6 +43,7 @@ class RegisterActivity : AppCompatActivity() {
 
     private var pendingR: ByteArray? = null
     private var pendingP: ByteArray? = null
+    private var isFaceMode = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,8 +51,13 @@ class RegisterActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         keystoreManager = KeystoreManager(this)
-        apiClient = TakeApiClient(SERVER_URL)
+        apiClient = TakeApiClient(getServerUrl())
 
+        binding.toggleBioMode.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                isFaceMode = (checkedId == R.id.btnFaceMode)
+            }
+        }
 
         binding.btnRegister.setOnClickListener { startRegistration() }
         binding.btnGoToLogin.setOnClickListener {
@@ -67,11 +83,15 @@ class RegisterActivity : AppCompatActivity() {
             return
         }
 
-        startFingerprintRegistration(idU, password)
+        if (isFaceMode) {
+            startFaceRegistration(idU, password)
+        } else {
+            startFingerprintRegistration(idU, password)
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
-    // FINGERPRINT MODE (existing flow — unchanged)
+    // FINGERPRINT MODE (Keystore TEE — unchanged)
     // ─────────────────────────────────────────────────────────────
 
     private fun startFingerprintRegistration(idU: String, password: String) {
@@ -111,7 +131,69 @@ class RegisterActivity : AppCompatActivity() {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // OPRF registration protocol
+    // FACE MODE (Paper-faithful: Gen(bio) → R, P)
+    // ─────────────────────────────────────────────────────────────
+
+    private fun startFaceRegistration(idU: String, password: String) {
+        setLoading(true, "Opening camera for face scan...")
+
+        // Save credentials for use after camera returns
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString("pending_id_u", idU)
+            .putString("pending_password", password)
+            .apply()
+
+        // Launch face capture activity
+        @Suppress("DEPRECATION")
+        startActivityForResult(
+            Intent(this, FaceCaptureActivity::class.java),
+            FaceCaptureActivity.REQUEST_CODE
+        )
+    }
+
+    @Deprecated("Using deprecated API for simplicity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == FaceCaptureActivity.REQUEST_CODE) {
+            if (resultCode == RESULT_OK && data != null) {
+                val bioB64 = data.getStringExtra(FaceCaptureActivity.EXTRA_BIO_BITSTRING)
+                if (bioB64 != null) {
+                    val bio = Base64.decode(bioB64, Base64.NO_WRAP)
+                    processFaceRegistration(bio)
+                } else {
+                    setLoading(false)
+                    showError("Face capture returned no data")
+                }
+            } else {
+                setLoading(false)
+                showError("Face capture cancelled")
+            }
+        }
+    }
+
+    private fun processFaceRegistration(bio: ByteArray) {
+        setLoading(true, "Running Fuzzy Extractor Gen(bio)...")
+
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val idU      = prefs.getString("pending_id_u", "") ?: ""
+        val password = prefs.getString("pending_password", "") ?: ""
+
+        // Paper Section IV: Gen(bio) → (R, P)
+        val genResult = FuzzyExtractor.Gen(bio)
+        val R = genResult.R
+        val P = genResult.P
+
+        pendingR = R
+        pendingP = P
+
+        binding.tvStatus.text = "Face captured ✅ — Gen(bio) complete\nR: ${R.size} bytes, P: ${P.size} bytes"
+
+        runRegistrationProtocol(idU, password, R, P)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // OPRF registration protocol (shared by both modes)
     // ─────────────────────────────────────────────────────────────
 
     private fun runRegistrationProtocol(idU: String, password: String, R: ByteArray, P: ByteArray) {
@@ -119,7 +201,6 @@ class RegisterActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                // orchestration on Main, but executeRegistration will handle switching for blocking calls
                 executeRegistration(idU, password, R, P) { msg ->
                     withContext(Dispatchers.Main) {
                         setLoading(true, msg)
@@ -152,37 +233,39 @@ class RegisterActivity : AppCompatActivity() {
         // Paper Section IV — Registration
 
         onProgress("Computing Combined Factor H0(pw || R)...")
-        // Combined factor: H0(pw || R)
         val cf = TakeCrypto.combinedFactor(password, R)
 
         onProgress("Blinding Factor for OPRF...")
-        // Blind: choose random r, compute H0(pw||R)^r
         val (blinded, r) = TakeCrypto.oprfBlind(cf)
 
         onProgress("Sending Blinded Factor to Server...")
-        // Send to server → server computes blinded^(k1*k2^-1) inside TEE
         val oprfResponse = withContext(Dispatchers.IO) {
             apiClient.registerInit(idU, blinded)
         }
 
         onProgress("Unblinding Server OPRF Response...")
-        // Unblind: remove r → C = H0(pw||R)^(k1*k2^-1)
         val C = TakeCrypto.oprfUnblind(oprfResponse, r)
 
-        // Compute SHA256(password) for traditional DB comparison demo
         val pwHash = MessageDigest.getInstance("SHA-256")
             .digest(password.toByteArray())
             .joinToString("") { "%02x".format(it) }
 
         onProgress("Finalizing Registration with Server...")
-        // Send {IDU, P, C} to server
         withContext(Dispatchers.IO) {
             apiClient.registerFinalize(idU, P, C, pwHash)
         }
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Server URL configuration
+    // ─────────────────────────────────────────────────────────────
 
+    private fun getServerUrl(): String {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString("server_url", DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
+    }
 
+    // ─────────────────────────────────────────────────────────────
     // UI helpers
     // ─────────────────────────────────────────────────────────────
 
@@ -193,13 +276,14 @@ class RegisterActivity : AppCompatActivity() {
     }
 
     private fun showError(message: String) {
+        setLoading(false)
         binding.tvStatus.text = message
         binding.tvStatus.setTextColor(getColor(android.R.color.holo_red_dark))
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     companion object {
-        const val SERVER_URL = "http://10.0.2.2:5000" // Replace with your EC2 IP for production
+        const val DEFAULT_SERVER_URL = "http://18.208.203.94:5000"
         const val PREFS_NAME = "take_prefs"
         const val PREF_BIO_MODE = "bio_mode"
     }

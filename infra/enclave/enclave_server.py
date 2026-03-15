@@ -1,20 +1,21 @@
 """
 TAKE Enclave Server — runs INSIDE the Nitro Enclave.
 
-Listens on vsock for key derivation requests.
-The master key is loaded once at startup and NEVER leaves the enclave.
+Listens on vsock for requests. The master key is loaded once at
+startup and NEVER leaves the enclave.
+
+SECURITY: k1 and k2 are derived AND used inside the enclave.
+The host never sees k1 or k2. It sends blinded group elements in
+and receives computed results back — nothing else.
+
+Operations performed inside the enclave (per the paper):
+  Registration:  blinded^(k1 * k2^-1) mod Q
+  Auth OPRF:     blinded^k1 mod Q
+  Auth Verify:   C^k2 mod Q
 
 Protocol:
-  Request:  JSON {"action": "derive", "id_u": "<base64 user ID>", "master_key_hex": "<hex>"}
-  Response: JSON {"k1": <int_string>, "k2": <int_string>}
-
-  The master_key_hex is only sent on the FIRST call (sealing).
-  After that, the enclave holds it in memory.
-
-Security:
-  - Nitro Enclave has NO network access, NO persistent storage
-  - Communication only via vsock (host ↔ enclave)
-  - Even if host OS is compromised, enclave memory is isolated
+  Request:  JSON {"action": "...", ...}
+  Response: JSON {"result": "...", ...}
 """
 
 import json
@@ -26,7 +27,7 @@ from Crypto.Hash import SHA3_256
 # Crypto — must match server/crypto/primitives.py
 # ─────────────────────────────────────────────────────
 
-# Group order for RFC 3526 Group 14
+# 2048-bit MODP Group prime (RFC 3526 Group 14)
 Q = int(
     "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1"
     "29024E088A67CC74020BBEA63B139B22514A08798E3404DD"
@@ -62,6 +63,11 @@ def H2(data: bytes) -> int:
     return scalar
 
 
+def mod_exp(base: int, exp: int, mod: int) -> int:
+    """Fast modular exponentiation."""
+    return pow(base, exp, mod)
+
+
 # ─────────────────────────────────────────────────────
 # Enclave vsock server
 # ─────────────────────────────────────────────────────
@@ -70,11 +76,21 @@ VSOCK_PORT = 5005
 VSOCK_CID_ANY = 0xFFFFFFFF  # VMADDR_CID_ANY
 
 # Master key — held in enclave memory only
-_master_key: bytes | None = None
+_master_key = None
+
+
+def _derive_keys(id_u: bytes):
+    """Derive k1, k2 from master key + user ID. NEVER exported."""
+    global _master_key
+    if _master_key is None:
+        raise RuntimeError("Master key not initialized")
+    k1 = H1(_master_key + id_u)
+    k2 = H2(_master_key + id_u)
+    return k1, k2
 
 
 def handle_request(data: dict) -> dict:
-    """Process a key derivation request."""
+    """Process a request — all crypto stays inside the enclave."""
     global _master_key
 
     action = data.get("action")
@@ -90,23 +106,51 @@ def handle_request(data: dict) -> dict:
         print("[enclave] Master key sealed.")
         return {"status": "sealed"}
 
-    elif action == "derive":
+    elif action == "register_oprf":
+        # Registration: compute blinded^(k1 * k2^-1) mod Q
+        # Paper: "the operations are performed in TEE"
         if _master_key is None:
             return {"error": "Master key not sealed yet"}
 
-        id_u_b64 = data.get("id_u")
-        if not id_u_b64:
-            return {"error": "Missing id_u"}
+        id_u = base64.b64decode(data.get("id_u", ""))
+        blinded = int(data.get("blinded", "0"))
 
-        id_u = base64.b64decode(id_u_b64)
+        k1, k2 = _derive_keys(id_u)
+        k2_inv = pow(k2, -1, GROUP_ORDER)
+        exponent = (k1 * k2_inv) % GROUP_ORDER
+        result = mod_exp(blinded, exponent, Q)
 
-        k1 = H1(_master_key + id_u)
-        k2 = H2(_master_key + id_u)
+        return {"result": str(result)}
 
-        return {
-            "k1": str(k1),
-            "k2": str(k2)
-        }
+    elif action == "auth_oprf":
+        # Auth OPRF: compute blinded^k1 mod Q
+        # Paper: "S computes k1 = H1(k||IDU) and H0(pw||R)^(r'*k1),
+        #         where the operations are performed in TEE"
+        if _master_key is None:
+            return {"error": "Master key not sealed yet"}
+
+        id_u = base64.b64decode(data.get("id_u", ""))
+        blinded = int(data.get("blinded", "0"))
+
+        k1, _ = _derive_keys(id_u)
+        result = mod_exp(blinded, k1, Q)
+
+        return {"result": str(result)}
+
+    elif action == "auth_credential":
+        # Auth verify: compute C^k2 mod Q
+        # Paper: "S computes k2 = H2(k||IDU) and C' = C^k2,
+        #         where the operations are performed in TEE"
+        if _master_key is None:
+            return {"error": "Master key not sealed yet"}
+
+        id_u = base64.b64decode(data.get("id_u", ""))
+        credential = int(data.get("credential", "0"))
+
+        _, k2 = _derive_keys(id_u)
+        result = mod_exp(credential, k2, Q)
+
+        return {"result": str(result)}
 
     elif action == "health":
         return {

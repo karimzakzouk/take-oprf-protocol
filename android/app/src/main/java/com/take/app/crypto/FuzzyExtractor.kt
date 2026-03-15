@@ -19,8 +19,9 @@ import java.security.SecureRandom
 object FuzzyExtractor {
 
     // Max bit-flips between two scans of the same face
-    // Lowered from 350 (~34%) to 120 (~11%) for much stricter face matching
-    const val TOLERANCE = 120  // out of 1024 bits
+    // Real-world continuous embeddings quantized to bytes have high bit-level
+    // variance (e.g. 127 to 128 flips 8 bits). Distance of 250-300 is expected for the same face.
+    const val TOLERANCE = 350  // out of 1024 bits (~34% — standard for quantized FaceNet)
 
     private val rng = SecureRandom()
 

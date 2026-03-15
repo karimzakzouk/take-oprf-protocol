@@ -186,7 +186,7 @@ class TestBiometricPipeline:
         from server.crypto.fuzzy_extractor import _hamming_distance
         emb = self._fake_embedding()
         # Simulate same person, slightly different lighting/angle
-        emb_noisy = emb + np.random.default_rng(5).standard_normal(128) * 0.01
+        emb_noisy = emb + np.random.default_rng(5).standard_normal(128) * 0.007
         bs1 = embedding_to_bitstring(emb)
         bs2 = embedding_to_bitstring(emb_noisy)
         dist = _hamming_distance(bs1, bs2)

@@ -181,7 +181,7 @@ resource "aws_instance" "take_server" {
 
     # ── System setup ──
     yum update -y
-    yum install -y python3 python3-pip docker git sqlite
+    yum install -y python3 python3-pip docker git sqlite wget bzip2
 
     # ── Nitro Enclave CLI ──
     amazon-linux-extras install aws-nitro-enclaves-cli -y 2>/dev/null || \
@@ -197,45 +197,107 @@ resource "aws_instance" "take_server" {
     usermod -aG docker ec2-user
     usermod -aG ne ec2-user
 
-    # Configure enclave memory (512MB for our small enclave)
+    # Configure enclave memory (1024MB required for Python image)
     cat > /etc/nitro_enclaves/allocator.yaml <<ALLOCATOR
     ---
-    memory_mib: 512
+    memory_mib: 1024
     cpu_count: 2
     ALLOCATOR
     systemctl restart nitro-enclaves-allocator
 
-    # ── Deploy TAKE server ──
-    cd /home/ec2-user
+    chown -R ec2-user:ec2-user /home/ec2-user
 
-    # Clone the project from GitHub (replace with your actual repo URL once published)
-    git clone https://github.com/karimzakzouk/take-oprf-protocol.git take-project
-    
-    # Install dependencies
-
-    pip3 install -r take-project/requirements.txt
-
-    # Generate master key
-    export TAKE_MASTER_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-    echo "TAKE_MASTER_KEY=$TAKE_MASTER_KEY" >> /home/ec2-user/.bashrc
-
-    # Save master key for enclave sealing (in production: use KMS)
-    echo "$TAKE_MASTER_KEY" > /home/ec2-user/.take_master_key
-    chmod 600 /home/ec2-user/.take_master_key
-
-    # ── Build Nitro Enclave image ──
-    if [ -d take-project/infra/enclave ]; then
-      cd take-project/infra/enclave
-      docker build -t take-enclave .
-      nitro-cli build-enclave --docker-uri take-enclave --output-file take-enclave.eif
-      echo "[TAKE] Enclave image built: take-enclave.eif"
-    fi
-
-    echo "[TAKE] Server deployment complete."
+    echo "[TAKE] System setup complete. Project deployment handled by Terraform provisioners."
   EOF
 
   tags = {
     Name    = "take-server"
     Project = "TAKE"
+  }
+
+  # Ensure the instance is up and accessible before provisioners run
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = file("${path.module}/my-key.pem")
+      host        = self.public_ip
+    }
+
+    inline = [
+      "echo 'Waiting for cloud-init to finish...'",
+      "cloud-init status --wait",
+      "mkdir -p /home/ec2-user/take-oprf-protocol"
+    ]
+  }
+
+  # First, automatically create the tarball locally from the fresh source code
+  provisioner "local-exec" {
+    command = "cd ${path.module}/.. && tar --exclude='infra/.terraform' --exclude='android' --exclude='demo' -czf take-oprf-protocol.tar.gz server infra requirements.txt"
+  }
+
+  # Upload the freshly created project archive to the EC2 instance
+  provisioner "file" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = file("${path.module}/my-key.pem")
+      host        = self.public_ip
+    }
+
+    source      = "${path.module}/../take-oprf-protocol.tar.gz"
+    destination = "/home/ec2-user/take-oprf-protocol.tar.gz"
+  }
+
+  # Extract the folder, install dependencies, build enclave, and start service
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = file("${path.module}/my-key.pem")
+      host        = self.public_ip
+    }
+
+    inline = [
+      "cd /home/ec2-user",
+      "mkdir -p take-oprf-protocol",
+      "tar -xzf take-oprf-protocol.tar.gz -C take-oprf-protocol",
+      "rm -f take-oprf-protocol.tar.gz",
+
+      "cd /home/ec2-user/take-oprf-protocol",
+      "pip3 install -r requirements.txt",
+
+      "TAKE_MASTER_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')",
+      "echo \"TAKE_MASTER_KEY=$TAKE_MASTER_KEY\" >> /home/ec2-user/.bashrc",
+      "sudo rm -f /home/ec2-user/.take_master_key",
+      "echo \"$TAKE_MASTER_KEY\" > /home/ec2-user/.take_master_key",
+      "chmod 600 /home/ec2-user/.take_master_key",
+
+      "cd /home/ec2-user/take-oprf-protocol/infra/enclave",
+      "sudo docker build -t take-enclave .",
+      "sudo nitro-cli build-enclave --docker-uri take-enclave --output-file take-enclave.eif",
+      "sudo nitro-cli run-enclave --eif-path take-enclave.eif --memory 1024 --cpu-count 2 --debug-mode",
+      "sleep 3",
+
+      "cd /home/ec2-user/take-oprf-protocol",
+      "chmod +x server/crypto/models/download_models.sh",
+      "./server/crypto/models/download_models.sh",
+
+      "echo '[Unit]' | sudo tee /etc/systemd/system/take-server.service",
+      "echo 'Description=TAKE Protocol Flask Server' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo 'After=network.target' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo '[Service]' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo 'User=ec2-user' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo 'WorkingDirectory=/home/ec2-user/take-oprf-protocol' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo 'Environment=TAKE_USE_ENCLAVE=true' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo 'ExecStart=/usr/bin/python3 -m server.app' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo 'Restart=always' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo '[Install]' | sudo tee -a /etc/systemd/system/take-server.service",
+      "echo 'WantedBy=multi-user.target' | sudo tee -a /etc/systemd/system/take-server.service",
+
+      "sudo systemctl daemon-reload",
+      "sudo systemctl enable take-server",
+      "sudo systemctl restart take-server"
+    ]
   }
 }
