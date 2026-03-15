@@ -67,7 +67,8 @@ def init_db():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id_u        TEXT PRIMARY KEY,
+            user_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_u        TEXT UNIQUE NOT NULL,
             helper_p    BLOB NOT NULL,
             credential  TEXT NOT NULL,
             created_at  INTEGER NOT NULL
@@ -180,12 +181,16 @@ def register_init():
     if existing:
         return jsonify({"error": "User already registered"}), 409
 
+    # TO:
+    conn.execute(
+        "INSERT INTO users (id_u, helper_p, credential, created_at) VALUES (?,?,?,?)",
+        (id_u.decode(), b"", "", int(time.time()))
+    )
+    conn.commit()
+    row = conn.execute("SELECT user_id FROM users WHERE id_u=?", (id_u.decode(),)).fetchone()
+    idu_bytes = row["user_id"].to_bytes(4, 'big')
     blinded = b64_to_int(blinded_b64)
-
-    # Paper: "the operations are performed in TEE"
-    # blinded value goes IN, result comes OUT — k1/k2 never leave TEE
-    oprf_response = tee_register_oprf(id_u, blinded)
-
+    oprf_response = tee_register_oprf(idu_bytes, blinded)
     return jsonify({"oprf_response": int_to_b64(oprf_response)})
 
 
@@ -206,8 +211,8 @@ def register_finalize():
 
     conn = get_db()
     conn.execute(
-        "INSERT INTO users (id_u, helper_p, credential, created_at) VALUES (?,?,?,?)",
-        (id_u, helper_p, credential, now)
+        "UPDATE users SET helper_p=?, credential=?, created_at=? WHERE id_u=?",
+        (helper_p, credential, now, id_u)
     )
     conn.commit()
 
@@ -225,8 +230,10 @@ def register_finalize():
         except Exception as e:
             print(f"[server] Warning: traditional DB write failed: {e}")
 
-    print(f"[server] Registered user: {id_u}")
-    return jsonify({"status": "registered"})
+    row = conn.execute("SELECT user_id FROM users WHERE id_u=?", (id_u,)).fetchone()
+    user_id = row["user_id"]
+    print(f"[server] Registered user: {id_u} (user_id={user_id})")
+    return jsonify({"status": "registered", "user_id": user_id})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -280,7 +287,9 @@ def auth_oprf():
     X       = b64_to_int(dh_X_b64)
 
     # Paper: "the operations are performed in TEE"
-    oprf_response = tee_auth_oprf(id_u.encode(), blinded)
+    row2 = conn.execute("SELECT user_id FROM users WHERE id_u=?", (id_u,)).fetchone()
+    idu_bytes = row2["user_id"].to_bytes(4, 'big')
+    oprf_response = tee_auth_oprf(idu_bytes, blinded)
 
     y, Y = dh_keygen()
 
@@ -333,10 +342,11 @@ def auth_verify():
 
     C_stored = b64_to_int(row["credential"])
     # Paper: "S computes k2 and C' = C^k2, where the operations are performed in TEE"
-    C        = tee_auth_credential(id_u.encode(), C_stored)
+    row2 = conn.execute("SELECT user_id FROM users WHERE id_u=?", (id_u,)).fetchone()
+    idu_bytes = row2["user_id"].to_bytes(4, 'big')
+    C        = tee_auth_credential(idu_bytes, C_stored)
     shared   = dh_shared(y, X)
-
-    id_u_bytes = id_u.encode()
+    id_u_bytes = idu_bytes
     id_s_bytes = b"TAKE_SERVER_001"
 
     sigma1_expected = H3(concat(id_u_bytes, id_s_bytes, X, Y, shared, C))

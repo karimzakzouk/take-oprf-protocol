@@ -149,7 +149,7 @@ def tee_register_oprf(id_u, blinded: int) -> int:
     if USE_ENCLAVE:
         result = _enclave_request({
             "action": "register_oprf",
-            "id_u": _id_u_b64(id_u),
+            "id_u": base64.b64encode(id_u).decode(),
             "blinded": str(blinded)
         })
         return int(result["result"])
@@ -174,7 +174,7 @@ def tee_auth_oprf(id_u, blinded: int) -> int:
     if USE_ENCLAVE:
         result = _enclave_request({
             "action": "auth_oprf",
-            "id_u": _id_u_b64(id_u),
+            "id_u": base64.b64encode(id_u).decode(),
             "blinded": str(blinded)
         })
         return int(result["result"])
@@ -196,7 +196,7 @@ def tee_auth_credential(id_u, credential: int) -> int:
     if USE_ENCLAVE:
         result = _enclave_request({
             "action": "auth_credential",
-            "id_u": _id_u_b64(id_u),
+            "id_u": base64.b64encode(id_u).decode(),
             "credential": str(credential)
         })
         return int(result["result"])

@@ -19,7 +19,7 @@ RESET  = "\033[0m"
 BG_RED = "\033[41m"
 BG_GREEN = "\033[42m"
 
-SERVER   = os.environ.get("TAKE_SERVER_IP", "100.53.228.140")  # Replace with your EC2 IP
+SERVER   = os.environ.get("TAKE_SERVER_IP", "18.208.209.212")  # Replace with your EC2 IP
 SSH_KEY  = os.environ.get("TAKE_SSH_KEY", "../infra/my-key.pem")  # Path to your private key
 SSH_USER = "ec2-user"
 TMPDIR   = tempfile.mkdtemp(prefix="take_breach_")
@@ -132,7 +132,7 @@ def main():
         trad_conn = sqlite3.connect(stolen_trad)
         take_conn = sqlite3.connect(stolen_take)
         trad_rows = trad_conn.execute("SELECT * FROM users").fetchall()
-        take_rows = take_conn.execute("SELECT * FROM users").fetchall()
+        take_rows = take_conn.execute("SELECT id_u, credential FROM users").fetchall()
 
         print(f"  {RED}{BOLD}╔══ STOLEN: TRADITIONAL DATABASE ═══════════════════════╗{RESET}")
         for r in trad_rows:
@@ -142,7 +142,7 @@ def main():
 
         print(f"  {GREEN}{BOLD}╔══ STOLEN: TAKE DATABASE ═══════════════════════════════╗{RESET}")
         for r in take_rows:
-            cred = str(r[2])[:60]
+            cred = str(r[1])[:60]
             print(f"  {GREEN}║{RESET} {CYAN}{r[0]:<15}{RESET} {YELLOW}{cred}...{RESET}")
         print(f"  {GREEN}║{RESET} {DIM}(These are OPRF-blinded group elements, NOT hashes){RESET}")
         print(f"  {GREEN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}\n")
@@ -273,7 +273,7 @@ def main():
     trad_hash_file = os.path.join(TMPDIR, "trad_hashes.txt")
     if os.path.exists(trad_hash_file):
         j = subprocess.run(f"john --format=raw-sha256 --show {trad_hash_file}", shell=True, capture_output=True, text=True)
-        for line in j.stdout.split('\\n'):
+        for line in j.stdout.split('\n'):
             if ':' in line and not line.startswith('0 password hashes'):
                 parts = line.split(':', 1)
                 cracked_pws[parts[0]] = parts[1]

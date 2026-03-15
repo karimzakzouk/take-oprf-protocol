@@ -70,8 +70,9 @@ def registered_user(client):
         "credential_c": int_to_b64(C)
     })
     assert resp2.status_code == 200
-
-    return {"id_u": id_u, "password": password, "bio": bio, "R": R, "P": P}
+    user_id = resp2.get_json()["user_id"]
+    idu_bytes = user_id.to_bytes(4, 'big')
+    return {"id_u": id_u, "password": password, "bio": bio, "R": R, "P": P, "idu_bytes": idu_bytes}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -172,7 +173,7 @@ class TestAuthentication:
 
         # Step 5: DH shared secret + σ1
         shared  = dh_shared(x, Y)
-        sigma1  = H3(concat(SHA3_256.new(id_u.encode()).digest()[:4], id_s, X, Y, shared, C_prime))
+        sigma1  = H3(concat(registered_user["idu_bytes"], id_s, X, Y, shared, C_prime))
 
         # Step 6: send σ1, get σ2
         resp3 = client.post("/auth/verify", json={
@@ -184,11 +185,11 @@ class TestAuthentication:
         sigma2 = b64d(resp3.get_json()["sigma2"])
 
         # Step 7: verify σ2
-        sigma2_expected = H4(concat(SHA3_256.new(id_u.encode()).digest()[:4], id_s, X, Y, shared, C_prime))
+        sigma2_expected = H4(concat(registered_user["idu_bytes"], id_s, X, Y, shared, C_prime))
         assert sigma2 == sigma2_expected, "σ2 verification failed"
 
         # Step 8: derive session key
-        SK = H5(concat(SHA3_256.new(id_u.encode()).digest()[:4], id_s, X, Y, shared, C_prime))
+        SK = H5(concat(registered_user["idu_bytes"], id_s, X, Y, shared, C_prime))
         assert len(SK) == 32
         print(f"\n  Session key: {SK.hex()[:32]}...")
 
@@ -213,7 +214,7 @@ class TestAuthentication:
         Y       = b64_to_int(data["dh_Y"])
         id_s    = data["id_s"].encode()
         shared  = dh_shared(x, Y)
-        sigma1  = H3(concat(SHA3_256.new(id_u.encode()).digest()[:4], id_s, X, Y, shared, C_prime))
+        sigma1  = H3(concat(registered_user["idu_bytes"], id_s, X, Y, shared, C_prime))
 
         resp3 = client.post("/auth/verify", json={
             "id_u":   id_u,
@@ -243,7 +244,7 @@ class TestAuthentication:
             Y      = b64_to_int(data["dh_Y"])
             id_s   = data["id_s"].encode()
             shared = dh_shared(x, Y)
-            s1     = H3(concat(SHA3_256.new(id_u.encode()).digest()[:4], id_s, X, Y, shared, C_p))
+            s1     = H3(concat(registered_user["idu_bytes"], id_s, X, Y, shared, C_p))
             client.post("/auth/verify", json={"id_u": id_u, "sigma1": b64e(s1)})
 
         resp = client.post("/auth/init", json={"id_u": id_u})
@@ -270,7 +271,7 @@ class TestAuthentication:
         Y       = b64_to_int(data["dh_Y"])
         id_s    = data["id_s"].encode()
         shared  = dh_shared(x, Y)
-        sigma1  = H3(concat(SHA3_256.new(id_u.encode()).digest()[:4], id_s, X, Y, shared, C_prime))
+        sigma1  = H3(concat(registered_user["idu_bytes"], id_s, X, Y, shared, C_prime))
 
         resp1 = client.post("/auth/verify", json={"id_u": id_u, "sigma1": b64e(sigma1)})
         assert resp1.status_code == 200

@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.math.BigInteger
+import java.nio.ByteBuffer
 
 /**
  * Login screen — supports two biometric modes:
@@ -237,6 +238,10 @@ class LoginActivity : AppCompatActivity() {
     ): ByteArray {
         // Paper Section IV — Authentication and Key Exchange
 
+        val userId = getSharedPreferences(RegisterActivity.PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt("user_id", -1)
+        require(userId != -1) { "No user_id stored — please re-register" }
+        val iduBytes = ByteBuffer.allocate(4).putInt(userId).array()
         onProgress("Connecting to TAKE Server...")
         // In face mode, we already called authInit to get P.
         // In fingerprint mode, we still call it for protocol completeness.
@@ -268,7 +273,7 @@ class LoginActivity : AppCompatActivity() {
         onProgress("Verifying Server Authentication (σ1/σ2)...")
         val sigma1 = TakeCrypto.H3(
             TakeCrypto.concat(
-                TakeCrypto.iduBytes(idU),
+                iduBytes,
                 idS.toByteArray(),
                 X, Y, shared, cPrime
             )
@@ -280,7 +285,7 @@ class LoginActivity : AppCompatActivity() {
 
         val sigma2Expected = TakeCrypto.H4(
             TakeCrypto.concat(
-                TakeCrypto.iduBytes(idU),
+                iduBytes,
                 idS.toByteArray(),
                 X, Y, shared, cPrime
             )
@@ -292,7 +297,7 @@ class LoginActivity : AppCompatActivity() {
 
         return TakeCrypto.H5(
             TakeCrypto.concat(
-                TakeCrypto.iduBytes(idU),
+                iduBytes,
                 idS.toByteArray(),
                 X, Y, shared, cPrime
             )

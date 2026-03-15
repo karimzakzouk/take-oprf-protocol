@@ -223,7 +223,7 @@ class TestTAKEProtocolCrypto:
         No networking — just verifies all math is correct.
         """
         # ── Setup ──────────────────────────────────────────
-        IDU = SHA3_256.new(b"user001").digest()[:4]
+        IDU = (1).to_bytes(4, 'big')
         IDS = b"server001"
         password = "mySecurePassword!"
         R = b"biometric_secret_R_value_here_32"  # from fuzzy extractor

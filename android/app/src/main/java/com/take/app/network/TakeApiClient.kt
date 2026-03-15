@@ -104,7 +104,7 @@ class TakeApiClient(private val serverUrl: String) {
         helperP: ByteArray,
         credentialC: BigInteger,
         passwordHash: String = ""
-    ) {
+    ): Int {
         val body = JSONObject().apply {
             put("id_u", idU)
             put("helper_p", TakeCrypto.bytesToB64(helperP))
@@ -113,7 +113,8 @@ class TakeApiClient(private val serverUrl: String) {
                 put("password_hash", passwordHash)
             }
         }
-        post("/register/finalize", body)
+        val resp = post("/register/finalize", body)
+        return resp.getInt("user_id")
     }
 
     // ─────────────────────────────────────────────────────────────

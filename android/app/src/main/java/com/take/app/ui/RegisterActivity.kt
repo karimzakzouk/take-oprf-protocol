@@ -251,9 +251,12 @@ class RegisterActivity : AppCompatActivity() {
             .joinToString("") { "%02x".format(it) }
 
         onProgress("Finalizing Registration with Server...")
-        withContext(Dispatchers.IO) {
+        val userId = withContext(Dispatchers.IO) {
             apiClient.registerFinalize(idU, P, C, pwHash)
         }
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putInt("user_id", userId)
+            .apply()
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -283,7 +286,7 @@ class RegisterActivity : AppCompatActivity() {
     }
 
     companion object {
-        const val DEFAULT_SERVER_URL = "http://3.231.148.209:5000"
+        const val DEFAULT_SERVER_URL = "http://18.208.209.212:5000"
         const val PREFS_NAME = "take_prefs"
         const val PREF_BIO_MODE = "bio_mode"
     }
