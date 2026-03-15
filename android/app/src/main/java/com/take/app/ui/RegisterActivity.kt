@@ -1,0 +1,206 @@
+package com.take.app.ui
+
+import android.content.Intent
+import android.os.Bundle
+import android.util.Base64
+import android.view.View
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.take.app.crypto.FuzzyExtractor
+import com.take.app.crypto.KeystoreManager
+import com.take.app.crypto.TakeCrypto
+import com.take.app.databinding.ActivityRegisterBinding
+import com.take.app.network.TakeApiClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.security.SecureRandom
+import java.security.MessageDigest
+import java.math.BigInteger
+
+/**
+ * Registration screen (Fingerprint only):
+ *   R = random 32 bytes, stored in Android Keystore (hardware TEE).
+ *   P = dummy 160 zero bytes (no fuzzy extractor needed).
+ *   This matches Section IV of the TAKE paper.
+ */
+class RegisterActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityRegisterBinding
+    private lateinit var keystoreManager: KeystoreManager
+    private lateinit var apiClient: TakeApiClient
+
+    private var pendingR: ByteArray? = null
+    private var pendingP: ByteArray? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityRegisterBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        keystoreManager = KeystoreManager(this)
+        apiClient = TakeApiClient(SERVER_URL)
+
+
+        binding.btnRegister.setOnClickListener { startRegistration() }
+        binding.btnGoToLogin.setOnClickListener {
+            startActivity(Intent(this, LoginActivity::class.java))
+        }
+    }
+
+    private fun startRegistration() {
+        val idU      = binding.etUsername.text.toString().trim()
+        val password = binding.etPassword.text.toString()
+        val confirm  = binding.etConfirmPassword.text.toString()
+
+        if (idU.isEmpty()) {
+            binding.etUsername.error = "Username required"
+            return
+        }
+        if (password.length < 6) {
+            binding.etPassword.error = "Password must be at least 6 characters"
+            return
+        }
+        if (password != confirm) {
+            binding.etConfirmPassword.error = "Passwords do not match"
+            return
+        }
+
+        startFingerprintRegistration(idU, password)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // FINGERPRINT MODE (existing flow — unchanged)
+    // ─────────────────────────────────────────────────────────────
+
+    private fun startFingerprintRegistration(idU: String, password: String) {
+        setLoading(true, "Generating your secret key...")
+
+        val R = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        pendingR = R
+        pendingP = ByteArray(160)  // dummy P for fingerprint mode
+
+        keystoreManager.generateKey()
+
+        val encryptCipher = try {
+            keystoreManager.getEncryptCipher()
+        } catch (e: Exception) {
+            setLoading(false)
+            showError("Keystore error: ${e.message}")
+            return
+        }
+
+        setLoading(false)
+        binding.tvStatus.text = "Press your fingerprint to secure your key"
+
+        keystoreManager.showBiometricPrompt(
+            activity  = this,
+            title     = "Secure your account",
+            subtitle  = "Your fingerprint will protect your secret key",
+            cipher    = encryptCipher,
+            onSuccess = { authenticatedCipher ->
+                keystoreManager.storeR(R, authenticatedCipher)
+                runRegistrationProtocol(idU, password, R, pendingP!!)
+            },
+            onFailure = { error ->
+                setLoading(false)
+                showError(error)
+            }
+        )
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // OPRF registration protocol
+    // ─────────────────────────────────────────────────────────────
+
+    private fun runRegistrationProtocol(idU: String, password: String, R: ByteArray, P: ByteArray) {
+        setLoading(true, "Registering with server...")
+
+        lifecycleScope.launch {
+            try {
+                // orchestration on Main, but executeRegistration will handle switching for blocking calls
+                executeRegistration(idU, password, R, P) { msg ->
+                    withContext(Dispatchers.Main) {
+                        setLoading(true, msg)
+                    }
+                }
+                setLoading(false)
+                binding.tvStatus.text = "Registration complete ✅"
+                binding.tvStatus.setTextColor(getColor(android.R.color.holo_green_dark))
+
+                binding.root.postDelayed({
+                    startActivity(Intent(this@RegisterActivity, LoginActivity::class.java))
+                    finish()
+                }, 1500)
+
+            } catch (e: Exception) {
+                setLoading(false)
+                val msg = e.message ?: e.toString()
+                showError("Registration failed: $msg")
+            }
+        }
+    }
+
+    private suspend fun executeRegistration(
+        idU: String,
+        password: String,
+        R: ByteArray,
+        P: ByteArray,
+        onProgress: suspend (String) -> Unit
+    ) {
+        // Paper Section IV — Registration
+
+        onProgress("Computing Combined Factor H0(pw || R)...")
+        // Combined factor: H0(pw || R)
+        val cf = TakeCrypto.combinedFactor(password, R)
+
+        onProgress("Blinding Factor for OPRF...")
+        // Blind: choose random r, compute H0(pw||R)^r
+        val (blinded, r) = TakeCrypto.oprfBlind(cf)
+
+        onProgress("Sending Blinded Factor to Server...")
+        // Send to server → server computes blinded^(k1*k2^-1) inside TEE
+        val oprfResponse = withContext(Dispatchers.IO) {
+            apiClient.registerInit(idU, blinded)
+        }
+
+        onProgress("Unblinding Server OPRF Response...")
+        // Unblind: remove r → C = H0(pw||R)^(k1*k2^-1)
+        val C = TakeCrypto.oprfUnblind(oprfResponse, r)
+
+        // Compute SHA256(password) for traditional DB comparison demo
+        val pwHash = MessageDigest.getInstance("SHA-256")
+            .digest(password.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+
+        onProgress("Finalizing Registration with Server...")
+        // Send {IDU, P, C} to server
+        withContext(Dispatchers.IO) {
+            apiClient.registerFinalize(idU, P, C, pwHash)
+        }
+    }
+
+
+
+    // UI helpers
+    // ─────────────────────────────────────────────────────────────
+
+    private fun setLoading(loading: Boolean, message: String = "") {
+        binding.progressBar.visibility = if (loading) View.VISIBLE else View.GONE
+        binding.btnRegister.isEnabled  = !loading
+        if (message.isNotEmpty()) binding.tvStatus.text = message
+    }
+
+    private fun showError(message: String) {
+        binding.tvStatus.text = message
+        binding.tvStatus.setTextColor(getColor(android.R.color.holo_red_dark))
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    companion object {
+        const val SERVER_URL = "http://10.0.2.2:5000" // Replace with your EC2 IP for production
+        const val PREFS_NAME = "take_prefs"
+        const val PREF_BIO_MODE = "bio_mode"
+    }
+}
