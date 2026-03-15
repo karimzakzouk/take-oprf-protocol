@@ -27,7 +27,7 @@ import java.math.BigInteger
  *
  * FINGERPRINT mode:
  *   R = random 32 bytes, stored in Android Keystore (hardware TEE).
- *   P = dummy 160 zero bytes (no fuzzy extractor needed).
+ *   P = dummy 128 zero bytes (no fuzzy extractor needed).
  *
  * FACE mode (paper-faithful):
  *   Camera captures face → MobileFaceNet embedding → 128-byte bio.

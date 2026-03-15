@@ -56,7 +56,7 @@ The three properties that make it interesting:
 The app ships with two biometric modes, selectable from the UI.
 
 ### Face Mode — Paper-Faithful
-Implements the protocol exactly as specified in the paper. A **MobileFaceNet** TFLite model runs entirely on-device and extracts a compact, discriminative facial representation. This feeds into a **cryptographic fuzzy extractor** (XOR secure sketch + SHA-3) that derives the blinding factor R from the biometric — tolerating natural intra-class variation of up to ~17% bit-flip noise between scans.
+Implements the protocol exactly as specified in the paper. A **MobileFaceNet** TFLite model runs entirely on-device and extracts a compact, discriminative facial representation. This feeds into a **cryptographic fuzzy extractor** (BCH syndrome-based secure sketch, Dodis et al. 2008) that derives the blinding factor R from the biometric — tolerating up to 24 bit-flips (~2.3% of the 1024-bit input) between registration and authentication scans. Sign-bit encoding of the embedding ensures realistic inter-scan noise stays well within this threshold.
 
 ### Fingerprint Mode — Hardware TEE
 Stores R inside the **Android hardware Keystore**, protected by `BiometricPrompt` fingerprint authentication. The Android Keystore is itself a hardware TEE, satisfying the same client-side isolation assumptions the paper makes. This mode is faster and more practical for deployment.

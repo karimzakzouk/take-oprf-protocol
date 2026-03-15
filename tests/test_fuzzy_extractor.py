@@ -179,9 +179,11 @@ class TestBiometricPipeline:
         Similar face embeddings (small noise) should produce
         bitstrings within fuzzy extractor tolerance.
 
-        With fixed-range quantization, noise of 0.01 std causes roughly
-        ~20-50 bit flips out of 1024 — well within TOLERANCE=350.
-        (Per-sample normalization caused 200+ flips — that bug is fixed.)
+        With sign-bit encoding, a sign flip only occurs when noise pushes
+        a value across zero. For dlib/MobileFaceNet embeddings (~N(0,0.09))
+        with realistic inter-scan noise (~0.007 std), the probability of a
+        sign flip per dimension is ~1-2%, yielding 0-3 total bit flips across
+        128 dimensions — well within TOLERANCE=24.
         """
         from server.crypto.fuzzy_extractor import _hamming_distance
         emb = self._fake_embedding()

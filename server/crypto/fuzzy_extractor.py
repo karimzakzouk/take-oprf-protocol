@@ -337,7 +337,7 @@ def Rep(bio_prime: bytes, P: bytes) -> bytes:
     Output: R         -- same secret as Gen iff Hamming(bio, bio') <= TOLERANCE
 
     Raises:
-        ValueError if biometric difference exceeds TOLERANCE=32 bits
+        ValueError if biometric difference exceeds TOLERANCE=24 bits
     """
     if len(bio_prime) != BIO_BYTES:
         raise ValueError(f"Expected {BIO_BYTES}-byte biometric, got {len(bio_prime)}")
