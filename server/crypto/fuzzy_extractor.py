@@ -278,9 +278,9 @@ def _hamming_distance(a: bytes, b: bytes) -> int:
 # -----------------------------------------------------------------------------
 # PUBLIC API: Gen and Rep
 #
-# P layout (160 bytes total):
+# P layout (128 bytes total):
 #   [ nonce: 32 bytes, LSB of byte[31] encodes extra_bit ]
-#   [ syndrome: 128 bytes                                 ]
+#   [ syndrome: 96 bytes                                  ]
 #
 # The extra_bit (bio[1023], the 1024th bit) is packed into the LSB of the
 # last nonce byte. The nonce remains effectively random (255 bits of entropy).
@@ -382,7 +382,7 @@ def Rep(bio_prime: bytes, P: bytes) -> bytes:
 def add_noise(bio: bytes, n_flips: int = 10) -> bytes:
     """
     Simulate biometric noise by flipping n_flips random bits.
-    Rep succeeds only when n_flips <= TOLERANCE (=32).
+    Rep succeeds only when n_flips <= TOLERANCE (=24).
     No upper bound is enforced here -- callers testing failure paths
     can pass n_flips > TOLERANCE intentionally.
     """

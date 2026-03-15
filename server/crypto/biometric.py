@@ -175,7 +175,7 @@ def embedding_to_bitstring(embedding: np.ndarray) -> bytes:
     128 bytes for compatibility with the fuzzy extractor's expected input size.
 
     Stability guarantee:
-      Two scans of the same face typically differ by <= 3 bit flips (<<BCH_T=32),
+      Two scans of the same face typically differ by <= 3 bit flips (<<BCH_T=24),
       because sign flips require noise to cross zero, which is unlikely for
       dlib L2-normalized embeddings with typical inter-scan variation.
     """
